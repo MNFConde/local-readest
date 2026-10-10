@@ -15,6 +15,7 @@ pub fn sanitize(s: &str) -> String {
 }
 
 /// rawOrNil keeps a raw JSON sub-value verbatim; absent and null become None.
+#[allow(non_snake_case)]
 fn rawOrNil_field(v: Option<&serde_json::Value>) -> Option<Box<RawValue>> {
     match v {
         None => None,
@@ -122,13 +123,10 @@ pub struct PushedNote {
 
 // ── DB shapes (exactly the Go structs' json tags, including omitempty) ─────
 
-fn omit_str(s: &String) -> bool {
+fn omit_str(s: &str) -> bool {
     s.is_empty()
 }
 
-fn omit_opt(v: &Option<String>) -> bool {
-    v.is_none()
-}
 
 #[derive(Debug, Serialize)]
 pub struct DbBook {

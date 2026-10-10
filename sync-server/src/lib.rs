@@ -3,6 +3,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod jwt;
+pub mod proxy;
 pub mod ratelimit;
 pub mod rfc3339;
 pub mod routes;

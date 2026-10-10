@@ -104,7 +104,7 @@ fn account_op(
 
 async fn serve(cfg: Config) -> anyhow::Result<()> {
     std::fs::create_dir_all(cfg.files_root())?;
-    let mut conn = db::open_db(&cfg)?;
+    let conn = db::open_db(&cfg)?;
     let state: db::SharedState = Arc::new(db::AppState {
         db: conn.into(),
         cfg,

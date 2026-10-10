@@ -7,6 +7,7 @@ use serde_json::json;
 /// The `code` strings are part of the client contract (the Go reference sends
 /// `AUTH`/`VALIDATION`/`LOCKED`/`QUOTA_EXCEEDED`/`SERVER`); never rename them.
 #[derive(Debug, thiserror::Error)]
+#[allow(clippy::result_large_err)] // anyhow::Error payload; handlers return infrequently
 pub enum ApiError {
     #[error("missing token")]
     MissingToken,

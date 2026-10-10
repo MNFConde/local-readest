@@ -652,7 +652,7 @@ async fn storage_upload_put_get_roundtrip_with_range() {
 #[tokio::test]
 async fn storage_blob_rejects_foreign_scope_and_traversal() {
     let state = test_state(test_config("storage-scope"));
-    let token_a = token_for(&state, "user-a");
+    let _token_a = token_for(&state, "user-a");
     let token_b = token_for(&state, "user-b");
     let foreign_key = "user-a/Readest/Books/x/f";
 
@@ -789,4 +789,85 @@ async fn storage_quota_enforced_on_blob_put() {
         "over-quota put must 413"
     );
     assert_eq!(body, Value::Null); // plain-body error path
+}
+
+// ── proxies (T8) — offline paths only; upstream-forwarding paths need network ──
+
+#[tokio::test]
+async fn deepl_mock_echoes_without_key() {
+    let state = test_state(test_config("proxy-deepl"));
+    let token = token_for(&state, "user-p");
+    let app = routes::router(state);
+    let (status, body, _) = request(
+        app,
+        "POST",
+        "/api/deepl/translate",
+        Some(&token),
+        Some(json!({ "text": ["a", "b"], "target_lang": "DE" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["translations"], json!([{"text": "a"}, {"text": "b"}]));
+}
+
+#[tokio::test]
+async fn deepl_malformed_body_is_validation_error() {
+    let state = test_state(test_config("proxy-deepl-bad"));
+    let token = token_for(&state, "user-p");
+    let app = routes::router(state);
+    let (status, body, _) = request(
+        app,
+        "POST",
+        "/api/deepl/translate",
+        Some(&token),
+        Some(json!("not-an-object")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "VALIDATION");
+}
+
+#[tokio::test]
+async fn metadata_search_requires_q() {
+    let state = test_state(test_config("proxy-meta"));
+    let token = token_for(&state, "user-p");
+    let app = routes::router(state);
+    let (status, body, _) = request(app, "GET", "/api/metadata/search", Some(&token), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body, json!({ "error": "missing q", "code": "VALIDATION" }));
+}
+
+#[tokio::test]
+async fn tts_synthesis_is_a_documented_gap() {
+    let state = test_state(test_config("proxy-tts"));
+    let token = token_for(&state, "user-p");
+    let app = routes::router(state);
+    let (status, body, _) = request(
+        app,
+        "POST",
+        "/api/tts/edge",
+        Some(&token),
+        Some(json!({ "text": "hi", "voice": "en-US-AriaNeural" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["code"], "SERVER");
+}
+
+#[tokio::test]
+async fn proxies_require_auth() {
+    let state = test_state(test_config("proxy-auth"));
+    let app = routes::router(state.clone());
+    let (status, _, _) = request(
+        app,
+        "POST",
+        "/api/deepl/translate",
+        None,
+        Some(json!({ "text": ["a"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let app = routes::router(state.clone());
+    let (status, _, _) = request(app, "GET", "/api/metadata/search?q=x", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

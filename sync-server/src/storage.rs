@@ -128,7 +128,7 @@ fn storage_error_response(status: StatusCode, message: &str, code: &str) -> Resp
 /// The stored key MUST be `uid + "/" + fileName` verbatim (the client sends
 /// the full cloud path and later derives download keys the same way).
 pub async fn upload(
-    State(state): State<SharedState>,
+    State(_state): State<SharedState>,
     user: AuthUser,
     body: Bytes,
 ) -> Result<Response, ApiError> {
@@ -404,7 +404,6 @@ pub async fn list(
                 .then_with(|| a.key.cmp(&b.key)),
             _ => a.key.cmp(&b.key),
         };
-        let ord = if sort_by == "updated_at" { ord } else { ord };
         if asc {
             ord
         } else {

@@ -1,4 +1,4 @@
-use axum::routing::{delete, get, post, put};
+use axum::routing::{any, delete, get, post, put};
 use axum::{Json, Router};
 use serde_json::json;
 
@@ -35,6 +35,13 @@ pub fn router(state: SharedState) -> Router {
             "/api/storage/blob/{*key}",
             put(crate::storage::blob_put).get(crate::storage::blob_get),
         )
+        .route("/api/deepl/translate", post(crate::proxy::deepl_translate))
+        .route(
+            "/api/yandex-translate",
+            post(crate::proxy::yandex_translate),
+        )
+        .route("/api/tts/edge", any(crate::proxy::edge_tts))
+        .route("/api/metadata/search", get(crate::proxy::metadata_search))
         .with_state(state)
 }
 
