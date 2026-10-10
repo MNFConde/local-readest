@@ -1,0 +1,1681 @@
+# readest-client-selfhost.patch — ywz626/readest-selfhosted 自托管客户端改动（甄选版）
+# 基线: 官方 ac757777d fix(library): optimize bookshelf covers in background, closes #5632 (#5731) (merge-base, 2026-10 时官方领先该基线 478 提交)
+# 提取: 2026-10-11 于 ywz master 87885d3e0
+# 用法: git apply --3way docs/selfhosted/readest-client-selfhost.patch（需先 git fetch official main 提供 pre-image blob）
+# 收录: 自托管核心（auth/supabase/access/storage/transfer/登录UI/配额/分块下载健壮性）
+# 排除: ywz 的 pinnedAt/libraryPinnedGroups/统计页/OPDS 功能、Android 品牌改造(com.ywz626.readest.sh)、
+#       layout.tsx polyfill、locale 文件（登录 UI 英文回退，可按需补 zh-CN）、package.json/tauri.conf.json
+#       （server 构建脚本与 SELFHOSTED env 由 .env.local + 手工脚本提供，见同目录 README.md）
+# 重生成: 见本文件尾部维护命令注释
+diff --git a/apps/readest-app/.env.server.example b/apps/readest-app/.env.server.example
+new file mode 100644
+index 000000000..497a996dd
+--- /dev/null
++++ b/apps/readest-app/.env.server.example
+@@ -0,0 +1,20 @@
++# ── 客户端：自建同步服务端模式（self-hosted server）──
++# 用法：复制本文件为 .env.server 后按需修改，再以对应脚本启动：
++#   cp .env.server.example .env.server
++#   pnpm dev-server        # 开发
++#   pnpm build-server      # 构建
++#   pnpm start-server      # 运行
++#
++# 开启自建模式后，客户端用「登录码」调自建服务端 POST /api/auth 换取 JWT，
++# 关闭时保留官方 Supabase 登录（不配置 NEXT_PUBLIC_SELFHOSTED 即可）。
++
++# ── 自建模式开关 ──
++# 设为 1 启用自建模式（代码登录 + 自建服务端的 JWT），关闭则保留官方 Supabase 登录
++NEXT_PUBLIC_SELFHOSTED=1
++
++# 自建服务端的 Base URL（不含 /api 后缀，客户端会自动追加 /api）
++# 例如：http://localhost:8080  或  https://sync.your-domain.com
++# 【可选】自托管安装包已支持「运行时输入服务端地址」：用户首次登录时在应用内
++# 填写地址即可，无需在此硬编码、也无需为每个用户单独编译。此处仅作为开发环境
++# 的默认值，应用内填写的地址优先级更高。
++NEXT_PUBLIC_API_BASE_URL=
+diff --git a/apps/readest-app/src-tauri/Cargo.toml b/apps/readest-app/src-tauri/Cargo.toml
+index e65d30dac..7ecccab22 100644
+--- a/apps/readest-app/src-tauri/Cargo.toml
++++ b/apps/readest-app/src-tauri/Cargo.toml
+@@ -33,7 +33,7 @@ minisign-verify = "0.2"
+ log = "0.4"
+ thiserror = "2"
+ walkdir = "2"
+-tokio = { version = "1", features = ["fs"] }
++tokio = { version = "1", features = ["fs", "time"] }
+ tokio-util = { version = "0.7", features = ["codec", "rt"] }
+ futures-util = "0.3"
+ futures = "0.3.31"
+diff --git a/apps/readest-app/src-tauri/src/transfer_file.rs b/apps/readest-app/src-tauri/src/transfer_file.rs
+index f73a534ba..51a82abea 100644
+--- a/apps/readest-app/src-tauri/src/transfer_file.rs
++++ b/apps/readest-app/src-tauri/src/transfer_file.rs
+@@ -263,7 +263,47 @@ pub async fn download_file(
+             .await;
+     }
+ 
+-    // Multi-part download with range access
++    // Multi-part download with range access.
++    //
++    // The file is pre-allocated with set_len(total), so a failed part MUST NOT
++    // be silently skipped — that would leave a run of zero bytes and report a
++    // "successful" download of a corrupted book. Each part is retried a few
++    // times, and any part that still fails aborts the whole download and deletes
++    // the partial file so the caller surfaces a real error.
++    const MAX_PART_RETRIES: u32 = 3;
++    const PART_RETRY_BASE_DELAY_MS: u64 = 200;
++
++    async fn download_part(
++        client: &reqwest::Client,
++        url: &str,
++        headers: &HashMap<String, String>,
++        start: u64,
++        end: u64,
++    ) -> Result<bytes::Bytes> {
++        let mut req = client.get(url).header("Range", format!("bytes={start}-{end}"));
++        for (key, value) in headers {
++            req = req.header(key, value);
++        }
++        let resp = req.send().await?;
++        // Only a 206 Partial Content is acceptable here. A 200 carrying the
++        // whole body would be written at this part's offset and corrupt the file.
++        if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
++            return Err(Error::HttpErrorCode(
++                resp.status().as_u16(),
++                resp.text().await.unwrap_or_default(),
++            ));
++        }
++        let bytes = resp.bytes().await?;
++        if bytes.len() as u64 != end - start + 1 {
++            return Err(Error::ContentLength(format!(
++                "part {start}-{end}: expected {} bytes, got {}",
++                end - start + 1,
++                bytes.len()
++            )));
++        }
++        Ok(bytes)
++    }
++
+     let part_count = total.div_ceil(PART_SIZE);
+     let file = File::create(file_path).await?;
+     file.set_len(total).await?;
+@@ -271,8 +311,8 @@ pub async fn download_file(
+     let file = Arc::new(tokio::sync::Mutex::new(file));
+     let progress = Arc::new(tokio::sync::Mutex::new(TransferStats::default()));
+ 
+-    stream::iter(0..part_count)
+-        .for_each_concurrent(8, |i| {
++    let results: Vec<Result<()>> = stream::iter(0..part_count)
++        .map(|i| {
+             let client = client.clone();
+             let file = Arc::clone(&file);
+             let progress = Arc::clone(&progress);
+@@ -283,48 +323,54 @@ pub async fn download_file(
+             async move {
+                 let start = i * PART_SIZE;
+                 let end = min(start + PART_SIZE - 1, total - 1);
+-                let range_header = format!("bytes={start}-{end}");
+ 
+-                let mut req = client.get(&url).header("Range", range_header);
+-                for (key, value) in headers {
+-                    req = req.header(key, value);
+-                }
+-
+-                let resp = match req.send().await {
+-                    Ok(r) => r,
+-                    Err(_) => return,
+-                };
+-
+-                if !resp.status().is_success()
+-                    && resp.status() != reqwest::StatusCode::PARTIAL_CONTENT
+-                {
+-                    return;
+-                }
+-
+-                let bytes = match resp.bytes().await {
+-                    Ok(b) => b,
+-                    Err(_) => return,
+-                };
+-
+-                {
+-                    let mut f = file.lock().await;
+-                    f.seek(std::io::SeekFrom::Start(start)).await.unwrap();
+-                    f.write_all(&bytes).await.unwrap();
+-                }
+-
+-                {
+-                    let mut stat = progress.lock().await;
+-                    stat.record_chunk_transfer(bytes.len());
+-                    let _ = on_progress.send(ProgressPayload {
+-                        progress: stat.total_transferred,
+-                        total,
+-                        transfer_speed: stat.transfer_speed,
+-                    });
++                let mut attempt = 0u32;
++                loop {
++                    match download_part(&client, &url, &headers, start, end).await {
++                        Ok(bytes) => {
++                            {
++                                let mut f = file.lock().await;
++                                f.seek(std::io::SeekFrom::Start(start)).await?;
++                                f.write_all(&bytes).await?;
++                            }
++                            {
++                                let mut stat = progress.lock().await;
++                                stat.record_chunk_transfer(bytes.len());
++                                let _ = on_progress.send(ProgressPayload {
++                                    progress: stat.total_transferred,
++                                    total,
++                                    transfer_speed: stat.transfer_speed,
++                                });
++                            }
++                            return Ok(());
++                        }
++                        Err(err) => {
++                            attempt += 1;
++                            if attempt >= MAX_PART_RETRIES {
++                                return Err(err);
++                            }
++                            tokio::time::sleep(std::time::Duration::from_millis(
++                                PART_RETRY_BASE_DELAY_MS * attempt as u64,
++                            ))
++                            .await;
++                        }
++                    }
+                 }
+             }
+         })
++        .buffer_unordered(8)
++        .collect::<Vec<_>>()
+         .await;
+ 
++    // Any part that still fails after its retries means the file on disk is
++    // incomplete — delete it and report the error instead of returning a
++    // "successful" broken download.
++    if let Some(err) = results.into_iter().find_map(std::result::Result::err) {
++        drop(file);
++        let _ = tokio::fs::remove_file(file_path).await;
++        return Err(err);
++    }
++
+     Ok(resp_headers)
+ }
+ 
+diff --git a/apps/readest-app/src/__tests__/helpers/auth.test.ts b/apps/readest-app/src/__tests__/helpers/auth.test.ts
+index d4f61c2a1..bc4dd14ae 100644
+--- a/apps/readest-app/src/__tests__/helpers/auth.test.ts
++++ b/apps/readest-app/src/__tests__/helpers/auth.test.ts
+@@ -1,5 +1,6 @@
+ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+ import type { User, AuthError } from '@supabase/supabase-js';
++import type { SelfhostedUser } from '@/services/selfhostedAuth';
+ 
+ // Mock supabase before importing the module under test
+ const mockSetSession = vi.fn();
+@@ -12,6 +13,8 @@ vi.mock('@/utils/supabase', () => ({
+       getUser: () => mockGetUser(),
+     },
+   },
++  // These tests exercise the official Supabase OAuth path, not self-hosted.
++  SELFHOSTED: false,
+ }));
+ 
+ import { handleAuthCallback, parseOAuthCallbackUrl } from '@/helpers/auth';
+@@ -65,7 +68,9 @@ describe('parseOAuthCallbackUrl', () => {
+ });
+ 
+ describe('handleAuthCallback', () => {
+-  let mockLogin: ReturnType<typeof vi.fn<(accessToken: string, user: User) => void>>;
++  let mockLogin: ReturnType<
++    typeof vi.fn<(accessToken: string, user: User | SelfhostedUser) => void>
++  >;
+   let mockNavigate: ReturnType<typeof vi.fn<(path: string) => void>>;
+ 
+   const fakeUser: User = {
+@@ -77,7 +82,7 @@ describe('handleAuthCallback', () => {
+   } as User;
+ 
+   beforeEach(() => {
+-    mockLogin = vi.fn<(accessToken: string, user: User) => void>();
++    mockLogin = vi.fn<(accessToken: string, user: User | SelfhostedUser) => void>();
+     mockNavigate = vi.fn<(path: string) => void>();
+     mockSetSession.mockReset();
+     mockGetUser.mockReset();
+diff --git a/apps/readest-app/src/__tests__/helpers/supabase-mock.ts b/apps/readest-app/src/__tests__/helpers/supabase-mock.ts
+index 7ac0fdd30..e089e7b89 100644
+--- a/apps/readest-app/src/__tests__/helpers/supabase-mock.ts
++++ b/apps/readest-app/src/__tests__/helpers/supabase-mock.ts
+@@ -18,7 +18,7 @@ export const setupSupabaseMocks = async (
+ ) => {
+   const { supabase, createSupabaseAdminClient } = await import('@/utils/supabase');
+ 
+-  vi.mocked(supabase.auth.getUser).mockResolvedValue(
++  vi.mocked(supabase!.auth.getUser).mockResolvedValue(
+     customResponses.getUser || {
+       data: {
+         user: {
+@@ -34,7 +34,7 @@ export const setupSupabaseMocks = async (
+     },
+   );
+ 
+-  vi.mocked(supabase.from).mockReturnValue({
++  vi.mocked(supabase!.from).mockReturnValue({
+     select: vi.fn(() => ({
+       eq: vi.fn(() => ({
+         single: vi.fn().mockResolvedValue(customResponses.select || { data: null, error: null }),
+@@ -45,7 +45,7 @@ export const setupSupabaseMocks = async (
+       eq: vi.fn().mockResolvedValue(customResponses.update || { data: {}, error: null }),
+     })),
+     insert: vi.fn().mockResolvedValue(customResponses.insert || { data: {}, error: null }),
+-  } as unknown as ReturnType<typeof supabase.from>);
++  } as unknown as ReturnType<NonNullable<typeof supabase>['from']>);
+ 
+   vi.mocked(createSupabaseAdminClient).mockReturnValue({
+     from: vi.fn(() => ({
+diff --git a/apps/readest-app/src/__tests__/utils/selfhostedAuth.test.ts b/apps/readest-app/src/__tests__/utils/selfhostedAuth.test.ts
+new file mode 100644
+index 000000000..235775852
+--- /dev/null
++++ b/apps/readest-app/src/__tests__/utils/selfhostedAuth.test.ts
+@@ -0,0 +1,66 @@
++import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
++
++// 模拟 JWT（HS256 不验签，只 decode）：sub=owner, plan=pro
++const b64url = (s: string) => Buffer.from(s, 'utf-8').toString('base64');
++const fakeJwt =
++  b64url('{"alg":"HS256","typ":"JWT"}') +
++  '.' +
++  b64url(JSON.stringify({ sub: 'owner', plan: 'pro', exp: 9999999999 })) +
++  '.sig';
++
++// The functions below branch on `SELFHOSTED`, which is a module-level constant
++// derived from `NEXT_PUBLIC_SELFHOSTED`. We stub that env var and reset the
++// module cache so `supabase.ts` / `access.ts` re-evaluate in self-hosted mode.
++async function importAccessInSelfhosted() {
++  vi.stubEnv('NEXT_PUBLIC_SELFHOSTED', '1');
++  vi.resetModules();
++  return import('@/utils/access');
++}
++
++describe('selfhosted auth', () => {
++  beforeEach(() => {
++    localStorage.setItem('token', fakeJwt);
++  });
++  afterEach(() => {
++    localStorage.clear();
++    vi.unstubAllEnvs();
++    vi.resetModules();
++  });
++
++  it('getAccessToken returns stored token', async () => {
++    const { getAccessToken } = await importAccessInSelfhosted();
++    expect(await getAccessToken()).toBe(fakeJwt);
++  });
++
++  it('getUserID derives sub from JWT without supabase', async () => {
++    const { getUserID } = await importAccessInSelfhosted();
++    expect(await getUserID()).toBe('owner');
++  });
++
++  it('getSubscriptionPlan reads plan=pro from token (no quota limit)', async () => {
++    const { getSubscriptionPlan } = await importAccessInSelfhosted();
++    expect(getSubscriptionPlan(fakeJwt)).toBe('pro');
++  });
++
++  it('jwtSub parses sub from a self-hosted JWT', async () => {
++    const { jwtSub } = await import('@/services/selfhostedAuth');
++    expect(jwtSub(fakeJwt)).toBe('owner');
++    expect(jwtSub(null)).toBeNull();
++    expect(jwtSub('invalid')).toBeNull();
++  });
++
++  it('jwtToUser derives id (and email when present) from a self-hosted JWT', async () => {
++    const { jwtToUser } = await import('@/services/selfhostedAuth');
++    expect(jwtToUser(fakeJwt)).toEqual({ id: 'owner', email: undefined });
++    // non-ASCII (UTF-8) claim must decode correctly, not return null
++    const b64urlUtf8 = (s: string) => Buffer.from(s, 'utf-8').toString('base64');
++    const utf8Jwt =
++      b64urlUtf8('{"alg":"HS256","typ":"JWT"}') +
++      '.' +
++      b64urlUtf8(JSON.stringify({ sub: 'owner', email: '用户@example.com', exp: 9999999999 })) +
++      '.sig';
++    expect(jwtToUser(utf8Jwt)).toEqual({ id: 'owner', email: '用户@example.com' });
++    expect(jwtToUser(null)).toBeNull();
++    expect(jwtToUser('invalid')).toBeNull();
++  });
++});
+diff --git a/apps/readest-app/src/app/auth/components/AuthPanel.tsx b/apps/readest-app/src/app/auth/components/AuthPanel.tsx
+index a8106eb1f..7e5be0ea5 100644
+--- a/apps/readest-app/src/app/auth/components/AuthPanel.tsx
++++ b/apps/readest-app/src/app/auth/components/AuthPanel.tsx
+@@ -3,14 +3,17 @@ import type { SupabaseClient } from '@supabase/supabase-js';
+ import { FcGoogle } from 'react-icons/fc';
+ import { FaApple, FaGithub, FaDiscord } from 'react-icons/fa';
+ import { useTranslation } from '@/hooks/useTranslation';
++import { SELFHOSTED } from '@/utils/supabase';
++import type { SelfhostedUser } from '@/services/selfhostedAuth';
+ import { ProviderLogin, type OAuthProvider } from './ProviderLogin';
+ import EmailPasswordAuth from './EmailPasswordAuth';
+ 
+ interface AuthPanelProps {
+-  supabaseClient: SupabaseClient;
++  supabaseClient: SupabaseClient | null;
+   redirectTo?: string;
+   magicLink?: boolean;
+   onProviderSignIn: (provider: OAuthProvider) => Promise<void>;
++  onSelfhostedLogin?: (accessToken: string, user: SelfhostedUser) => void;
+ }
+ 
+ export default function AuthPanel({
+@@ -18,6 +21,7 @@ export default function AuthPanel({
+   redirectTo,
+   magicLink = false,
+   onProviderSignIn,
++  onSelfhostedLogin,
+ }: AuthPanelProps) {
+   const _ = useTranslation();
+ 
+@@ -28,45 +32,52 @@ export default function AuthPanel({
+         <div>
+           <h1 className='text-xl font-semibold tracking-tight'>{_('Sign in to Readest')}</h1>
+           <p className='text-base-content/70 mt-1.5 text-sm leading-relaxed'>
+-            {_('Sync your library, reading progress, and highlights across your devices.')}
++            {SELFHOSTED
++              ? _('Sign in with your self-hosted sync server login code.')
++              : _('Sync your library, reading progress, and highlights across your devices.')}
+           </p>
+         </div>
+       </div>
+-      <div className='flex w-full flex-col gap-2.5'>
+-        <ProviderLogin
+-          provider='google'
+-          handleSignIn={onProviderSignIn}
+-          Icon={FcGoogle}
+-          label={_('Sign in with {{provider}}', { provider: 'Google' })}
+-        />
+-        <ProviderLogin
+-          provider='apple'
+-          handleSignIn={onProviderSignIn}
+-          Icon={FaApple}
+-          label={_('Sign in with {{provider}}', { provider: 'Apple' })}
+-        />
+-        <ProviderLogin
+-          provider='github'
+-          handleSignIn={onProviderSignIn}
+-          Icon={FaGithub}
+-          label={_('Sign in with {{provider}}', { provider: 'GitHub' })}
+-        />
+-        <ProviderLogin
+-          provider='discord'
+-          handleSignIn={onProviderSignIn}
+-          Icon={FaDiscord}
+-          label={_('Sign in with {{provider}}', { provider: 'Discord' })}
+-        />
+-      </div>
++      {!SELFHOSTED && (
++        <div className='flex w-full flex-col gap-2.5'>
++          <ProviderLogin
++            provider='google'
++            handleSignIn={onProviderSignIn}
++            Icon={FcGoogle}
++            label={_('Sign in with {{provider}}', { provider: 'Google' })}
++          />
++          <ProviderLogin
++            provider='apple'
++            handleSignIn={onProviderSignIn}
++            Icon={FaApple}
++            label={_('Sign in with {{provider}}', { provider: 'Apple' })}
++          />
++          <ProviderLogin
++            provider='github'
++            handleSignIn={onProviderSignIn}
++            Icon={FaGithub}
++            label={_('Sign in with {{provider}}', { provider: 'GitHub' })}
++          />
++          <ProviderLogin
++            provider='discord'
++            handleSignIn={onProviderSignIn}
++            Icon={FaDiscord}
++            label={_('Sign in with {{provider}}', { provider: 'Discord' })}
++          />
++        </div>
++      )}
+       <div className='flex w-full items-center gap-3' aria-hidden='true'>
+         <hr className='border-base-300 flex-1 border-t' />
+-        <span className='text-base-content/50 text-xs'>{_('or continue with email')}</span>
++        <span className='text-base-content/50 text-xs'>
++          {SELFHOSTED ? _('self-hosted') : _('or continue with email')}
++        </span>
+         <hr className='border-base-300 flex-1 border-t' />
+       </div>
+       <EmailPasswordAuth
+         supabaseClient={supabaseClient}
+         redirectTo={redirectTo}
+         magicLink={magicLink}
++        onSelfhostedLogin={onSelfhostedLogin}
+       />
+     </div>
+   );
+diff --git a/apps/readest-app/src/app/auth/components/EmailPasswordAuth.tsx b/apps/readest-app/src/app/auth/components/EmailPasswordAuth.tsx
+index 6c2a23f8b..fd7f92c2b 100644
+--- a/apps/readest-app/src/app/auth/components/EmailPasswordAuth.tsx
++++ b/apps/readest-app/src/app/auth/components/EmailPasswordAuth.tsx
+@@ -1,13 +1,19 @@
+ import { useEffect, useState } from 'react';
+ import type { SupabaseClient } from '@supabase/supabase-js';
+ import { useTranslation } from '@/hooks/useTranslation';
++import { SELFHOSTED } from '@/utils/supabase';
++import { selfhostedLogin, jwtToUser, saveLoginCode } from '@/services/selfhostedAuth';
++import type { SelfhostedUser } from '@/services/selfhostedAuth';
++import { getSelfhostedServerUrl, saveSelfhostedServerUrl } from '@/services/selfhostedServerUrl';
+ 
+ type AuthView = 'sign_in' | 'sign_up' | 'magic_link' | 'forgotten_password';
+ 
+ interface EmailPasswordAuthProps {
+-  supabaseClient: SupabaseClient;
++  supabaseClient: SupabaseClient | null;
+   redirectTo?: string;
+   magicLink?: boolean;
++  // Self-hosted mode: called with the JWT issued by the sync server.
++  onSelfhostedLogin?: (accessToken: string, user: SelfhostedUser) => void;
+ }
+ 
+ const FORM_IDS: Record<AuthView, string> = {
+@@ -24,6 +30,7 @@ export default function EmailPasswordAuth({
+   supabaseClient,
+   redirectTo,
+   magicLink = false,
++  onSelfhostedLogin,
+ }: EmailPasswordAuthProps) {
+   const _ = useTranslation();
+   const [view, setView] = useState<AuthView>('sign_in');
+@@ -32,6 +39,9 @@ export default function EmailPasswordAuth({
+   const [message, setMessage] = useState('');
+   const [error, setError] = useState('');
+   const [keyboardInset, setKeyboardInset] = useState(0);
++  // Self-hosted mode: server address entered at runtime (persisted) instead of
++  // baked in at build time, so a shared installer works for any user.
++  const [serverUrl, setServerUrl] = useState(() => getSelfhostedServerUrl());
+ 
+   const hasPassword = view === 'sign_in' || view === 'sign_up';
+ 
+@@ -84,12 +94,70 @@ export default function EmailPasswordAuth({
+     // Read credentials from the form's DOM state: Android/iOS password
+     // managers fill WebView inputs without events React state can track.
+     const formData = new FormData(event.currentTarget);
+-    const email = String(formData.get('email') || '').trim();
++    // In self-hosted mode the shared login code is the only credential and is
++    // entered into the password field; the email field is hidden.
+     const password = String(formData.get('password') || '');
++    const email = SELFHOSTED ? '' : String(formData.get('email') || '').trim();
+     setError('');
+     setMessage('');
+     setLoading(true);
+     try {
++      // Self-hosted mode: a single shared code is used instead of email/password.
++      if (SELFHOSTED) {
++        try {
++          saveSelfhostedServerUrl(serverUrl);
++          const { access_token } = await selfhostedLogin(password);
++          const user = jwtToUser(access_token);
++          if (!user) throw new Error('invalid token');
++          // Persist the code so an expired JWT can be refreshed without
++          // re-prompting (mirrors Supabase's persisted refresh_token).
++          saveLoginCode(password);
++          // The caller (`onSelfhostedLogin`) is responsible for logging in AND
++          // navigating away (via SPA router.push) so the behavior matches the
++          // OAuth path on every platform (Tauri / iOS / Android / Web) without
++          // triggering a full WebView reload.
++          onSelfhostedLogin?.(access_token, user);
++        } catch (e) {
++          const err = e as Error & {
++            status?: number;
++            lockedUntil?: number;
++            reason?: string;
++          };
++          if (err.reason === 'network') {
++            // 连不上服务端：URL 没配对 / 服务端没启动 / 防火墙 / CORS
++            setError(
++              _(
++                'Cannot connect to the sync server. Check that the server is running and the server address is correctly configured in the app.',
++              ),
++            );
++          } else if (err.reason === 'no-url') {
++            setError(_('Please enter your sync server address above before signing in.'));
++          } else if (err.reason === 'server') {
++            setError(
++              _(
++                'The sync server encountered an internal error. Please check the server logs and try again later.',
++              ),
++            );
++          } else if (err.reason === 'locked' || err.status === 429) {
++            // 兜底：旧版本错误可能没有 reason 字段，仍按 429 处理
++            if (err.lockedUntil) {
++              const mins = Math.max(1, Math.ceil((err.lockedUntil - Date.now()) / 60000));
++              setError(
++                _(
++                  'Too many failed attempts. This device is locked. Try again in {{minutes}} min.',
++                  { minutes: mins },
++                ),
++              );
++            } else {
++              setError(_('Too many failed attempts. This device is temporarily locked.'));
++            }
++          } else {
++            setError(_('Invalid login code'));
++          }
++        }
++        return;
++      }
++      if (!supabaseClient) throw new Error('No backend connected');
+       if (view === 'sign_in') {
+         const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+         if (error) setError(error.message);
+@@ -124,7 +192,7 @@ export default function EmailPasswordAuth({
+   const buttonLabel = {
+     sign_in: loading ? _('Signing in...') : _('Sign in'),
+     sign_up: loading ? _('Signing up...') : _('Sign up'),
+-    magic_link: loading ? _('Signing in ...') : _('Sign in'),
++    magic_link: loading ? _('Signing in...') : _('Sign in'),
+     forgotten_password: loading
+       ? _('Sending reset instructions ...')
+       : _('Send reset password instructions'),
+@@ -138,37 +206,65 @@ export default function EmailPasswordAuth({
+       onSubmit={handleSubmit}
+       className='w-full space-y-4'
+     >
+-      <div className='form-control'>
+-        <label className='label' htmlFor='email'>
+-          <span className='label-text'>{_('Email address')}</span>
+-        </label>
+-        <input
+-          id='email'
+-          name='email'
+-          type='email'
+-          required
+-          defaultValue={defaultEmail}
+-          placeholder={_('Your email address')}
+-          autoComplete={hasPassword ? 'username' : 'email'}
+-          className='input input-bordered eink-bordered w-full rounded-lg placeholder:text-sm'
+-          disabled={loading}
+-          onFocus={keepAboveKeyboard}
+-        />
+-      </div>
++      {SELFHOSTED && (
++        <div className='form-control'>
++          <label className='label' htmlFor='server-url'>
++            <span className='label-text'>{_('Sync server address')}</span>
++          </label>
++          <input
++            id='server-url'
++            name='server-url'
++            type='url'
++            inputMode='url'
++            value={serverUrl}
++            onChange={(e) => setServerUrl(e.target.value)}
++            placeholder={_('https://sync.your-server.com')}
++            autoComplete='url'
++            className='input input-bordered eink-bordered w-full rounded-lg placeholder:text-sm'
++            disabled={loading}
++            onFocus={keepAboveKeyboard}
++          />
++        </div>
++      )}
++      {!SELFHOSTED && (
++        <div className='form-control'>
++          <label className='label' htmlFor='email'>
++            <span className='label-text'>{_('Email address')}</span>
++          </label>
++          <input
++            id='email'
++            name='email'
++            type='email'
++            required
++            defaultValue={defaultEmail}
++            placeholder={_('Your email address')}
++            autoComplete={hasPassword ? 'username' : 'email'}
++            className='input input-bordered eink-bordered w-full rounded-lg placeholder:text-sm'
++            disabled={loading}
++            onFocus={keepAboveKeyboard}
++          />
++        </div>
++      )}
+       {hasPassword && (
+         <div className='form-control'>
+           <label className='label' htmlFor='password'>
+             <span className='label-text'>
+-              {view === 'sign_in' ? _('Your Password') : _('Create a Password')}
++              {SELFHOSTED
++                ? _('Login code')
++                : view === 'sign_in'
++                  ? _('Your Password')
++                  : _('Create a Password')}
+             </span>
+           </label>
+           <input
+             id='password'
+             name='password'
+-            type='password'
++            type={SELFHOSTED ? 'text' : 'password'}
+             required
+-            placeholder={_('Your password')}
+-            autoComplete={view === 'sign_in' ? 'current-password' : 'new-password'}
++            placeholder={SELFHOSTED ? _('Your login code') : _('Your password')}
++            autoComplete={
++              SELFHOSTED ? 'off' : view === 'sign_in' ? 'current-password' : 'new-password'
++            }
+             className='input input-bordered eink-bordered w-full rounded-lg placeholder:text-sm'
+             disabled={loading}
+             onFocus={keepAboveKeyboard}
+@@ -190,7 +286,7 @@ export default function EmailPasswordAuth({
+         </div>
+       )}
+       <div className='flex flex-col items-center gap-2.5 pt-1 text-sm'>
+-        {view === 'sign_in' && (
++        {!SELFHOSTED && view === 'sign_in' && (
+           <>
+             {magicLink && (
+               <button type='button' className={LINK_CLASS} onClick={switchView('magic_link')}>
+@@ -205,7 +301,7 @@ export default function EmailPasswordAuth({
+             </button>
+           </>
+         )}
+-        {view !== 'sign_in' && (
++        {!SELFHOSTED && view !== 'sign_in' && (
+           <button type='button' className={LINK_CLASS} onClick={switchView('sign_in')}>
+             {_('Already have an account? Sign in')}
+           </button>
+diff --git a/apps/readest-app/src/app/auth/page.tsx b/apps/readest-app/src/app/auth/page.tsx
+index e55c6681c..bdb69b705 100644
+--- a/apps/readest-app/src/app/auth/page.tsx
++++ b/apps/readest-app/src/app/auth/page.tsx
+@@ -227,6 +227,12 @@ export default function AuthPage() {
+     }
+   };
+ 
++  const handleSelfhostedLogin = (...args: Parameters<typeof login>) => {
++    login(...args);
++    const redirectTo = new URLSearchParams(window.location.search).get('redirect');
++    router.push(redirectTo && redirectTo.startsWith('/') ? redirectTo : '/library');
++  };
++
+   const handleGoBack = () => {
+     // Keep login false to avoid infinite loop to redirect to the login page
+     settings.keepLogin = false;
+@@ -260,6 +266,7 @@ export default function AuthPage() {
+   }, []);
+ 
+   useEffect(() => {
++    if (!supabase) return; // Self-hosted mode: no Supabase session to observe
+     const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
+       if (session?.access_token && session.user) {
+         login(session.access_token, session.user);
+@@ -341,6 +348,7 @@ export default function AuthPage() {
+             magicLink={true}
+             redirectTo={getTauriRedirectTo(false)}
+             onProviderSignIn={tauriProviderSignIn}
++            onSelfhostedLogin={handleSelfhostedLogin}
+           />
+         </div>
+       </div>
+@@ -359,6 +367,7 @@ export default function AuthPage() {
+         magicLink={true}
+         redirectTo={getWebRedirectTo()}
+         onProviderSignIn={webProviderSignIn}
++        onSelfhostedLogin={handleSelfhostedLogin}
+       />
+     </div>
+   );
+diff --git a/apps/readest-app/src/app/auth/recovery/page.tsx b/apps/readest-app/src/app/auth/recovery/page.tsx
+index 5e090e62c..f74cedaad 100644
+--- a/apps/readest-app/src/app/auth/recovery/page.tsx
++++ b/apps/readest-app/src/app/auth/recovery/page.tsx
+@@ -30,6 +30,7 @@ export default function ResetPasswordPage() {
+   };
+ 
+   useEffect(() => {
++    if (!supabase) return; // Self-hosted mode: no Supabase session to observe
+     const { data: subscription } = supabase.auth.onAuthStateChange((event, session) => {
+       if (session?.access_token && session.user && event === 'USER_UPDATED') {
+         login(session.access_token, session.user);
+@@ -44,6 +45,10 @@ export default function ResetPasswordPage() {
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, [router]);
+ 
++  if (!supabase) {
++    return null;
++  }
++
+   return (
+     <div className='flex min-h-screen items-center justify-center'>
+       <div className='w-full max-w-md p-8'>
+diff --git a/apps/readest-app/src/app/auth/update/page.tsx b/apps/readest-app/src/app/auth/update/page.tsx
+index a259a6822..b61006639 100644
+--- a/apps/readest-app/src/app/auth/update/page.tsx
++++ b/apps/readest-app/src/app/auth/update/page.tsx
+@@ -29,6 +29,12 @@ export default function UpdateEmailPage() {
+     setMessage('');
+     setError('');
+ 
++    if (!supabase) {
++      setError(_('No backend connected'));
++      setLoading(false);
++      return;
++    }
++
+     try {
+       const { error: updateError } = await supabase.auth.updateUser({
+         email: email,
+diff --git a/apps/readest-app/src/context/AuthContext.tsx b/apps/readest-app/src/context/AuthContext.tsx
+index fd526c043..6b2e8f224 100644
+--- a/apps/readest-app/src/context/AuthContext.tsx
++++ b/apps/readest-app/src/context/AuthContext.tsx
+@@ -11,12 +11,19 @@ import {
+ } from 'react';
+ import { User } from '@supabase/supabase-js';
+ import { supabase } from '@/utils/supabase';
++import {
++  SelfhostedUser,
++  selfhostedLogin,
++  jwtToUser,
++  getSavedLoginCode,
++  isTokenExpired,
++} from '@/services/selfhostedAuth';
+ import posthog from 'posthog-js';
+ 
+ interface AuthContextType {
+   token: string | null;
+-  user: User | null;
+-  login: (token: string, user: User) => void;
++  user: User | SelfhostedUser | null;
++  login: (token: string, user: User | SelfhostedUser) => void;
+   logout: () => void;
+   refresh: () => void;
+ }
+@@ -30,10 +37,15 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
+     }
+     return null;
+   });
+-  const [user, setUser] = useState<User | null>(() => {
++  const [user, setUser] = useState<User | SelfhostedUser | null>(() => {
+     if (typeof window !== 'undefined') {
+       const userJson = localStorage.getItem('user');
+-      return userJson ? JSON.parse(userJson) : null;
++      try {
++        return userJson ? JSON.parse(userJson) : null;
++      } catch {
++        // Corrupted/legacy `user` payload must not crash the whole provider.
++        return null;
++      }
+     }
+     return null;
+   });
+@@ -59,15 +71,21 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
+         setUser(null);
+       }
+     };
++    // Self-hosted mode has no Supabase session to observe or refresh, so the
++    // whole effect must be skipped — supabase is null in that mode. A local
++    // const keeps the null-narrowing across the closures below.
++    const client = supabase;
++    if (!client) return;
++
+     const refreshSession = async () => {
+       try {
+-        await supabase.auth.refreshSession();
++        await client.auth.refreshSession();
+       } catch {
+         syncSession(null);
+       }
+     };
+ 
+-    const { data: subscription } = supabase.auth.onAuthStateChange((_, session) => {
++    const { data: subscription } = client.auth.onAuthStateChange((_, session) => {
+       syncSession(session);
+     });
+ 
+@@ -82,33 +100,57 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
+   // refs in the deps) is what makes the useMemo below actually memoize the
+   // context value — without this, login/logout/refresh would be recreated on
+   // every render and the memo would always invalidate.
+-  const login = useCallback((newToken: string, newUser: User) => {
++  const login = useCallback((newToken: string, newUser: User | SelfhostedUser) => {
+     console.log('Logging in');
+     setToken(newToken);
+     setUser(newUser);
+     localStorage.setItem('token', newToken);
+-    localStorage.setItem('user', JSON.stringify(newUser));
++    localStorage.setItem('user', JSON.stringify(newUser ?? {}));
++    // 自托管模式无 refresh_token 概念；清除任何历史残留，避免混淆
++    localStorage.removeItem('refresh_token');
+   }, []);
+ 
+   const logout = useCallback(async () => {
+     console.log('Logging out');
+-    try {
+-      await supabase.auth.refreshSession();
+-    } catch {
+-    } finally {
+-      await supabase.auth.signOut();
+-      localStorage.removeItem('token');
+-      localStorage.removeItem('user');
+-      setToken(null);
+-      setUser(null);
++    if (supabase) {
++      try {
++        await supabase.auth.refreshSession();
++      } catch {
++      } finally {
++        await supabase.auth.signOut();
++      }
+     }
++    localStorage.removeItem('token');
++    localStorage.removeItem('user');
++    localStorage.removeItem('refresh_token');
++    localStorage.removeItem('selfhosted_login_code');
++    setToken(null);
++    setUser(null);
+   }, []);
+ 
+   const refresh = useCallback(async () => {
++    if (!supabase) {
++      // Self-hosted mode: the JWT is short-lived. Re-login with the persisted
++      // login code once the current token has expired so the user stays
++      // signed in; if the code is no longer valid the next API call will 401
++      // and surface a re-login.
++      const storedToken = localStorage.getItem('token');
++      if (storedToken && !isTokenExpired(storedToken)) return;
++      const code = getSavedLoginCode();
++      if (!code) return;
++      try {
++        const { access_token } = await selfhostedLogin(code);
++        const user = jwtToUser(access_token);
++        if (user) login(access_token, user);
++      } catch {
++        // Keep the stale token; callers fall back to the login screen on 401.
++      }
++      return;
++    }
+     try {
+       await supabase.auth.refreshSession();
+     } catch {}
+-  }, []);
++  }, [login]);
+ 
+   const value = useMemo(
+     () => ({ token, user, login, logout, refresh }),
+diff --git a/apps/readest-app/src/helpers/auth.ts b/apps/readest-app/src/helpers/auth.ts
+index ac5a2b3ab..a96ed0c2c 100644
+--- a/apps/readest-app/src/helpers/auth.ts
++++ b/apps/readest-app/src/helpers/auth.ts
+@@ -1,10 +1,11 @@
+ import { User } from '@supabase/supabase-js';
+-import { supabase } from '@/utils/supabase';
++import { supabase, SELFHOSTED } from '@/utils/supabase';
++import { jwtToUser, SelfhostedUser } from '@/services/selfhostedAuth';
+ 
+ interface UseAuthCallbackOptions {
+   accessToken?: string | null;
+   refreshToken?: string | null;
+-  login: (accessToken: string, user: User) => void;
++  login: (accessToken: string, user: User | SelfhostedUser) => void;
+   navigate: (path: string) => void;
+   type?: string | null;
+   next?: string;
+@@ -60,7 +61,22 @@ export function handleAuthCallback({
+       return;
+     }
+ 
+-    const { error: err } = await supabase.auth.setSession({
++    // Self-hosted mode: the token is a JWT issued by the sync server. There is
++    // no Supabase session to set; derive the user from the JWT `sub` claim and
++    // log in directly. OAuth flows are not used in self-hosted mode.
++    if (SELFHOSTED) {
++      const user = jwtToUser(accessToken);
++      if (!user) {
++        console.error('Error deriving user from self-hosted token');
++        navigate('/auth/error');
++        return;
++      }
++      login(accessToken, user);
++      navigate(next);
++      return;
++    }
++
++    const { error: err } = await supabase!.auth.setSession({
+       access_token: accessToken,
+       refresh_token: refreshToken,
+     });
+@@ -73,7 +89,7 @@ export function handleAuthCallback({
+ 
+     const {
+       data: { user },
+-    } = await supabase.auth.getUser();
++    } = await supabase!.auth.getUser();
+     if (user) {
+       login(accessToken, user);
+       if (type === 'recovery') {
+diff --git a/apps/readest-app/src/hooks/useAvailablePlans.ts b/apps/readest-app/src/hooks/useAvailablePlans.ts
+index d53a9cccc..a2d1aea1c 100644
+--- a/apps/readest-app/src/hooks/useAvailablePlans.ts
++++ b/apps/readest-app/src/hooks/useAvailablePlans.ts
+@@ -3,6 +3,7 @@ import { fetchAndTransformIAPPlans, isIAPAvailable } from '@/libs/payment/iap/cl
+ import { fetchStripePlans } from '@/libs/payment/stripe/client';
+ import { AvailablePlan } from '@/types/quota';
+ import { stubTranslation as _ } from '@/utils/misc';
++import { SELFHOSTED } from '@/utils/supabase';
+ 
+ const IAP_PRODUCT_IDS = [
+   'com.bilingify.readest.monthly.plus',
+@@ -25,6 +26,15 @@ export const useAvailablePlans = ({ hasIAP, onError }: UseAvailablePlansParams)
+   const [error, setError] = useState<Error | null>(null);
+ 
+   useEffect(() => {
++    // Self-hosted deployments have no Stripe/IAP checkout flow, so skip
++    // fetching available plans and avoid surfacing a confusing error toast.
++    if (SELFHOSTED) {
++      setAvailablePlans([]);
++      setIapAvailable(false);
++      setLoading(false);
++      return;
++    }
++
+     const fetchPlans = async () => {
+       setLoading(true);
+       setError(null);
+diff --git a/apps/readest-app/src/hooks/useQuotaStats.ts b/apps/readest-app/src/hooks/useQuotaStats.ts
+index dcea559e8..890eb266d 100644
+--- a/apps/readest-app/src/hooks/useQuotaStats.ts
++++ b/apps/readest-app/src/hooks/useQuotaStats.ts
+@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
+ import { useAuth } from '@/context/AuthContext';
+ import { QuotaType, UserPlan } from '@/types/quota';
+ import { getStoragePlanData, getTranslationPlanData, getUserProfilePlan } from '@/utils/access';
++import { SELFHOSTED } from '@/utils/supabase';
++import { getStorageStats } from '@/libs/storage';
+ import { setCachedUserPlan } from '@/services/sync/cloudSyncProvider';
+ import { useTranslation } from './useTranslation';
+ 
+@@ -10,18 +12,45 @@ export const useQuotaStats = (briefName = false) => {
+   const { token, user } = useAuth();
+   const [quotas, setQuotas] = useState<QuotaType[]>([]);
+   const [userProfilePlan, setUserProfilePlan] = useState<UserPlan | undefined>(undefined);
++  const [selfhostedStorageUsage, setSelfhostedStorageUsage] = useState<number | null>(null);
++
++  // Self-hosted sync servers do not embed live usage in the JWT; fetch the
++  // actual server-side storage consumption so the menu reflects real usage.
++  useEffect(() => {
++    if (!SELFHOSTED || !token) return;
++
++    let cancelled = false;
++    getStorageStats()
++      .then((stats) => {
++        if (!cancelled) {
++          setSelfhostedStorageUsage(stats.usage);
++        }
++      })
++      .catch((error) => {
++        console.error('Failed to fetch self-hosted storage stats:', error);
++      });
++
++    return () => {
++      cancelled = true;
++    };
++  }, [token]);
+ 
+   useEffect(() => {
+     if (!user || !token) return;
+ 
+     const storagPlan = getStoragePlanData(token);
++    // In self-hosted mode prefer the actual server-side usage over the static
++    // (often zero) value decoded from the JWT.
++    const storageUsage = SELFHOSTED
++      ? (selfhostedStorageUsage ?? storagPlan.usage)
++      : storagPlan.usage;
+     const inGB = storagPlan.quota > 1e9;
+     const storageQuota: QuotaType = {
+       name: briefName ? _('Storage') : _('Cloud Sync Storage'),
+       tooltip: _('{{percentage}}% of Cloud Sync Space Used.', {
+-        percentage: Math.round((storagPlan.usage / storagPlan.quota) * 100),
++        percentage: Math.round((storageUsage / storagPlan.quota) * 100),
+       }),
+-      used: parseFloat((storagPlan.usage / 1024 / 1024 / (inGB ? 1024 : 1)).toFixed(2)),
++      used: parseFloat((storageUsage / 1024 / 1024 / (inGB ? 1024 : 1)).toFixed(2)),
+       total: Math.round((storagPlan.quota / 1024 / 1024 / (inGB ? 1024 : 1)) * 10) / 10,
+       unit: inGB ? 'GB' : 'MB',
+     };
+@@ -50,7 +79,7 @@ export const useQuotaStats = (briefName = false) => {
+     setCachedUserPlan(profilePlan);
+     setQuotas([storageQuota, translationQuota]);
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+-  }, [token]);
++  }, [token, selfhostedStorageUsage]);
+ 
+   return {
+     quotas,
+diff --git a/apps/readest-app/src/libs/storage.ts b/apps/readest-app/src/libs/storage.ts
+index 8d0b0e0a5..d1df2df37 100644
+--- a/apps/readest-app/src/libs/storage.ts
++++ b/apps/readest-app/src/libs/storage.ts
+@@ -1,6 +1,6 @@
+-import { getAPIBaseUrl, isWebAppPlatform } from '@/services/environment';
++import { getAPIBaseUrl, getBaseUrl, isWebAppPlatform } from '@/services/environment';
+ import { AppService } from '@/types/system';
+-import { getUserID } from '@/utils/access';
++import { getAccessToken, getUserID } from '@/utils/access';
+ import { fetchWithAuth } from '@/utils/fetch';
+ import {
+   tauriUpload,
+@@ -11,6 +11,24 @@ import {
+   ProgressPayload,
+ } from '@/utils/transfer';
+ 
++const toFullUrl = (url: string) => {
++  if (/^https?:\/\//i.test(url)) return url;
++  const base = getBaseUrl().replace(/\/+$/, '');
++  if (url.startsWith('/')) return `${base}${url}`;
++  return `${base}/${url}`;
++};
++
++/**
++ * Signed URLs (R2/S3 pre-signed) carry their own credentials and must NOT
++ * get an Authorization header. Path-only blob URLs from a self-hosted
++ * server's LocalDiskStore need the Bearer token instead.
++ */
++const buildBlobAuthHeaders = async (url: string): Promise<Record<string, string>> => {
++  if (/^https?:\/\//i.test(url)) return {};
++  const token = await getAccessToken();
++  return token ? { Authorization: `Bearer ${token}` } : {};
++};
++
+ const API_ENDPOINTS = {
+   upload: getAPIBaseUrl() + '/storage/upload',
+   download: getAPIBaseUrl() + '/storage/download',
+@@ -64,10 +82,11 @@ export const uploadFile = async (
+ 
+     const { uploadUrl, downloadUrl }: { uploadUrl: string; downloadUrl?: string } =
+       await response.json();
++    const blobHeaders = await buildBlobAuthHeaders(uploadUrl);
+     if (isWebAppPlatform()) {
+-      await webUpload(file, uploadUrl, onProgress);
++      await webUpload(file, uploadUrl, onProgress, blobHeaders);
+     } else {
+-      await tauriUpload(uploadUrl, fileFullPath, 'PUT', onProgress);
++      await tauriUpload(toFullUrl(uploadUrl), fileFullPath, 'PUT', onProgress, blobHeaders);
+     }
+     return temp || media ? downloadUrl : undefined;
+   } catch (error) {
+@@ -108,10 +127,11 @@ export const uploadReplicaFile = async (
+     });
+ 
+     const { uploadUrl }: { uploadUrl: string } = await response.json();
++    const blobHeaders = await buildBlobAuthHeaders(uploadUrl);
+     if (isWebAppPlatform()) {
+-      await webUpload(file, uploadUrl, onProgress);
++      await webUpload(file, uploadUrl, onProgress, blobHeaders);
+     } else {
+-      await tauriUpload(uploadUrl, fileFullPath, 'PUT', onProgress);
++      await tauriUpload(toFullUrl(uploadUrl), fileFullPath, 'PUT', onProgress, blobHeaders);
+     }
+   } catch (error) {
+     console.error('Replica file upload failed:', error);
+@@ -195,20 +215,22 @@ export const downloadFile = async ({
+       throw new Error('No download URL available');
+     }
+ 
++    const blobAuthHeaders = await buildBlobAuthHeaders(downloadUrl);
++    const mergedHeaders = { ...blobAuthHeaders, ...headers };
+     if (isWebAppPlatform()) {
+       const { headers: responseHeaders, blob } = await webDownload(
+         downloadUrl,
+         onProgress,
+-        headers,
++        mergedHeaders,
+       );
+       await appService.writeFile(dst, 'None', await blob.arrayBuffer());
+       return responseHeaders;
+     } else {
+       return await tauriDownload(
+-        downloadUrl,
++        toFullUrl(downloadUrl),
+         dst,
+         onProgress,
+-        headers,
++        mergedHeaders,
+         undefined,
+         singleThreaded,
+         skipSslVerification,
+diff --git a/apps/readest-app/src/services/selfhostedAuth.ts b/apps/readest-app/src/services/selfhostedAuth.ts
+new file mode 100644
+index 000000000..e8bd61f2c
+--- /dev/null
++++ b/apps/readest-app/src/services/selfhostedAuth.ts
+@@ -0,0 +1,239 @@
++import { getSelfhostedServerUrl } from './selfhostedServerUrl';
++
++export interface SelfhostedLoginResult {
++  access_token: string;
++  token_type: string;
++}
++
++export interface SelfhostedUser {
++  id: string;
++  email?: string;
++  // Mirrors the Supabase `User` shape so UI code can read avatar/name metadata
++  // from either auth backend through the same accessor.
++  user_metadata?: Record<string, unknown>;
++}
++
++const DEVICE_ID_KEY = 'selfhosted_device_id';
++const LOGIN_CODE_KEY = 'selfhosted_login_code';
++
++/**
++ * Persist the shared login code so an expired JWT can be refreshed without
++ * re-prompting the user. This mirrors the official Supabase path persisting
++ * `refresh_token` in localStorage: the code is as sensitive as the token
++ * itself, so treat the whole localStorage payload as the credential.
++ */
++export function saveLoginCode(code: string): void {
++  if (typeof window === 'undefined') return;
++  if (!code) {
++    localStorage.removeItem(LOGIN_CODE_KEY);
++    return;
++  }
++  localStorage.setItem(LOGIN_CODE_KEY, code);
++}
++
++export function getSavedLoginCode(): string {
++  if (typeof window === 'undefined') return '';
++  return localStorage.getItem(LOGIN_CODE_KEY) ?? '';
++}
++
++/**
++ * Self-hosted server base URL. Read lazily at call time from the runtime store
++ * (set from the login form) so a pre-built installer works without per-user
++ * rebuilds. In self-hosted mode this MUST point at the user's own sync server —
++ * it never falls back to the official `web.readest.com`. If unset the login
++ * call fails loudly instead of leaking the shared code to a third-party domain.
++ */
++const getSelfhostedBaseUrl = (): string => getSelfhostedServerUrl();
++
++/**
++ * A stable per-installation device id, persisted in localStorage. Sent to the
++ * sync server as `X-Device-Id` so brute-force locks are bound to the device
++ * rather than a shared NAT IP.
++ */
++export function getDeviceId(): string {
++  if (typeof window === 'undefined') return '';
++  let id = localStorage.getItem(DEVICE_ID_KEY);
++  if (!id) {
++    id =
++      typeof crypto !== 'undefined' && 'randomUUID' in crypto
++        ? crypto.randomUUID()
++        : ((crypto as Crypto | undefined)?.randomUUID?.() ?? '');
++    localStorage.setItem(DEVICE_ID_KEY, id);
++  }
++  return id;
++}
++
++/**
++ * Login against a self-hosted Readest sync server using a shared static code.
++ * The server validates the code and returns a JWT (`plan: pro`, `sub: owner`).
++ */
++export type SelfhostedLoginErrorReason =
++  | 'no-url' // 未配置服务端地址
++  | 'network' // 连不上服务端（DNS/连接被拒/超时/CORS）
++  | 'server' // 服务端 5xx 内部错误
++  | 'locked' // 429 设备被限流锁定
++  | 'invalid-code'; // 服务端明确拒绝：授权码错误
++
++export class SelfhostedLoginError extends Error {
++  reason: SelfhostedLoginErrorReason;
++  status?: number;
++  lockedUntil?: number;
++  constructor(
++    message: string,
++    reason: SelfhostedLoginErrorReason,
++    extra?: { status?: number; lockedUntil?: number },
++  ) {
++    super(message);
++    this.name = 'SelfhostedLoginError';
++    this.reason = reason;
++    this.status = extra?.status;
++    this.lockedUntil = extra?.lockedUntil;
++  }
++}
++
++export async function selfhostedLogin(code: string): Promise<SelfhostedLoginResult> {
++  const baseUrl = getSelfhostedBaseUrl();
++  if (!baseUrl) {
++    throw new SelfhostedLoginError('Self-hosted server URL is not configured', 'no-url');
++  }
++  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
++  const deviceId = getDeviceId();
++  if (deviceId) headers['X-Device-Id'] = deviceId;
++  // The sync server registers its API surface under /api (see main.go); the
++  // other clients (sync/storage/translate) already use ${base}/api via
++  // getAPIBaseUrl, so the login endpoint must live on the same prefix.
++  let res: Response;
++  try {
++    res = await fetch(`${baseUrl}/api/auth`, {
++      method: 'POST',
++      headers,
++      body: JSON.stringify({ code }),
++    });
++  } catch {
++    // Network-level failure: DNS resolution, connection refused, timeout, or a
++    // CORS/pre-flight rejection all surface here as a rejected promise rather
++    // than a non-2xx response. Previously these were silently folded into
++    // "invalid code", making it impossible to tell a bad password from a dead
++    // server.
++    throw new SelfhostedLoginError(`Cannot reach the sync server at ${baseUrl}`, 'network');
++  }
++  if (!res.ok) {
++    const status = res.status;
++    // 429 = device locked after too many failures; surface the retry delay.
++    if (status === 429) {
++      const raw = res.headers.get('Retry-After') ?? '';
++      const retryAfter = Number(raw);
++      const lockedUntil =
++        !Number.isNaN(retryAfter) && retryAfter > 0
++          ? Date.now() + retryAfter * 1000
++          : !Number.isNaN(Date.parse(raw))
++            ? Date.parse(raw)
++            : undefined;
++      throw new SelfhostedLoginError('Too many failed attempts', 'locked', {
++        status,
++        lockedUntil,
++      });
++    }
++    // 5xx = server-side error, not a credential problem.
++    if (status >= 500) {
++      throw new SelfhostedLoginError(
++        `Sync server returned an internal error (${status})`,
++        'server',
++        { status },
++      );
++    }
++    // Any other non-2xx (400/401/etc.) means the server rejected the code.
++    throw new SelfhostedLoginError('invalid code', 'invalid-code', { status });
++  }
++  // Read the body as text first so a non-JSON response (HTML error page,
++  // nginx default page, redirect body, stray prefix/BOM) doesn't surface as a
++  // raw `SyntaxError: Unexpected non-whitespace character after JSON` with no
++  // actionable context. A 2xx with an unparseable body means the server
++  // contract changed or a proxy intercepted the response — report it clearly
++  // instead of letting the raw exception leak to the console.
++  const text = await res.text();
++  let parsed: SelfhostedLoginResult;
++  try {
++    parsed = JSON.parse(text) as SelfhostedLoginResult;
++  } catch {
++    throw new SelfhostedLoginError(
++      `Sync server returned a non-JSON response (HTTP ${res.status}); ` +
++        `check the server URL and that ${baseUrl}/api/auth is reachable`,
++      'server',
++      { status: res.status },
++    );
++  }
++  if (!parsed || typeof parsed.access_token !== 'string') {
++    throw new SelfhostedLoginError(
++      `Sync server response is missing 'access_token' (HTTP ${res.status})`,
++      'server',
++      { status: res.status },
++    );
++  }
++  return parsed;
++}
++
++/**
++ * Decode a Base64URL JWT payload (the middle segment) into an object, with
++ * UTF-8 safe handling so non-ASCII claims don't corrupt via `atob`.
++ */
++function decodeJwtPayload(token: string | null | undefined): Record<string, unknown> | null {
++  if (!token) return null;
++  try {
++    const parts = token.split('.');
++    if (parts.length < 2) return null;
++    const b64 = parts[1];
++    if (!b64) return null;
++    // JWT payload 使用 Base64URL，转换为标准 Base64 以兼容 atob
++    const normalized = b64.replace(/-/g, '+').replace(/_/g, '/');
++    const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), '=');
++    const binary = atob(padded);
++    const json =
++      typeof TextDecoder !== 'undefined'
++        ? new TextDecoder().decode(Uint8Array.from(binary, (c) => c.charCodeAt(0)))
++        : decodeURIComponent(escape(binary));
++    return JSON.parse(json) as Record<string, unknown>;
++  } catch {
++    return null;
++  }
++}
++
++/**
++ * Derive a minimal `User`-like object from a self-hosted JWT.
++ *
++ * SECURITY: client-side decoding is for UI/identity display only. Never use the
++ * decoded `sub` or `plan` as a trust boundary — the self-hosted sync server
++ * enforces authorization server-side in `middleware.RequireAuth` (HS256 verify).
++ * Any client-side feature gate must be treated as cosmetic; the server is the
++ * source of truth for access control.
++ */
++export function jwtToUser(token: string | null | undefined): SelfhostedUser | null {
++  const payload = decodeJwtPayload(token);
++  const sub = typeof payload?.['sub'] === 'string' ? payload['sub'] : null;
++  if (!sub) return null;
++  const email = typeof payload?.['email'] === 'string' ? payload['email'] : undefined;
++  return { id: sub, email };
++}
++
++/**
++ * Parse the `sub` claim from a JWT payload WITHOUT verifying the signature.
++ * Thin wrapper over {@link jwtToUser} kept for callers that only need the id.
++ *
++ * SECURITY: see {@link jwtToUser} — client-side decoding is display-only.
++ */
++export function jwtSub(token: string | null | undefined): string | null {
++  return jwtToUser(token)?.id ?? null;
++}
++
++/**
++ * Whether a self-hosted JWT is missing or already past its `exp` claim.
++ * Used by the auth refresh path to decide whether to re-login with the
++ * persisted login code. A token without an `exp` claim is treated as
++ * expired so the client re-validates against the server.
++ */
++export function isTokenExpired(token: string | null | undefined): boolean {
++  const payload = decodeJwtPayload(token);
++  const exp = typeof payload?.['exp'] === 'number' ? payload['exp'] : null;
++  if (exp === null) return true;
++  return Date.now() >= exp * 1000;
++}
+diff --git a/apps/readest-app/src/services/selfhostedServerUrl.ts b/apps/readest-app/src/services/selfhostedServerUrl.ts
+new file mode 100644
+index 000000000..b548e82fb
+--- /dev/null
++++ b/apps/readest-app/src/services/selfhostedServerUrl.ts
+@@ -0,0 +1,37 @@
++/**
++ * Runtime, user-supplied self-hosted sync server URL.
++ *
++ * In self-hosted mode the server address is no longer baked in at build time —
++ * the user enters it at login (persisted here) so a pre-built installer can be
++ * shared on GitHub Releases without per-user rebuilds. All API clients
++ * (sync / storage / translate / share / …) funnel through `getBaseUrl()` in
++ * `services/environment.ts`, which consults this store first in self-hosted
++ * mode; `selfhostedAuth` reads it for the login request too.
++ */
++
++const SERVER_URL_KEY = 'selfhosted_server_url';
++
++/** Persist the user-entered sync server base URL (no trailing slash). */
++export function saveSelfhostedServerUrl(url: string): void {
++  if (typeof window === 'undefined') return;
++  const normalized = url.trim().replace(/\/+$/, '');
++  if (!normalized) {
++    localStorage.removeItem(SERVER_URL_KEY);
++    return;
++  }
++  localStorage.setItem(SERVER_URL_KEY, normalized);
++}
++
++/** Return the persisted sync server base URL, or '' if none set. */
++export function getSelfhostedServerUrl(): string {
++  if (typeof window === 'undefined') return '';
++  return localStorage.getItem(SERVER_URL_KEY) ?? '';
++}
++
++/**
++ * Whether a self-hosted sync server URL has been configured at runtime.
++ * Used by the login form to decide whether to show the address field.
++ */
++export function hasSelfhostedServerUrl(): boolean {
++  return getSelfhostedServerUrl().length > 0;
++}
+diff --git a/apps/readest-app/src/services/sync/providers/gdrive/GoogleDriveProvider.ts b/apps/readest-app/src/services/sync/providers/gdrive/GoogleDriveProvider.ts
+index 5031b336c..dd3cdfcfd 100644
+--- a/apps/readest-app/src/services/sync/providers/gdrive/GoogleDriveProvider.ts
++++ b/apps/readest-app/src/services/sync/providers/gdrive/GoogleDriveProvider.ts
+@@ -730,7 +730,7 @@ class DriveProviderImpl {
+ 
+       const responseBody = await tauriUpload(sessionUri, localPath, 'PUT', undefined, {
+         [CONTENT_TYPE_HEADER]: DEFAULT_BINARY_CONTENT_TYPE,
+-      } as unknown as Map<string, string>);
++      });
+ 
+       // Overwrite preserves the file id; a new file's id is in the completion
+       // body. Cache it so a following head/read skips re-walking the tree;
+diff --git a/apps/readest-app/src/services/sync/providers/onedrive/OneDriveProvider.ts b/apps/readest-app/src/services/sync/providers/onedrive/OneDriveProvider.ts
+index ef730c703..55fe51263 100644
+--- a/apps/readest-app/src/services/sync/providers/onedrive/OneDriveProvider.ts
++++ b/apps/readest-app/src/services/sync/providers/onedrive/OneDriveProvider.ts
+@@ -252,7 +252,7 @@ class OneDriveProviderImpl {
+       const uploadUrl = await this.openUploadSession(remotePath);
+       await tauriUpload(uploadUrl, localPath, 'PUT', undefined, {
+         'Content-Range': `bytes 0-${size - 1}/${size}`,
+-      } as unknown as Map<string, string>);
++      });
+       return true;
+     } catch (e) {
+       console.warn('OneDriveProvider.uploadStream failed', remotePath, e);
+diff --git a/apps/readest-app/src/services/sync/providers/webdav/WebDAVProvider.ts b/apps/readest-app/src/services/sync/providers/webdav/WebDAVProvider.ts
+index 4405c6a25..fda6d7af2 100644
+--- a/apps/readest-app/src/services/sync/providers/webdav/WebDAVProvider.ts
++++ b/apps/readest-app/src/services/sync/providers/webdav/WebDAVProvider.ts
+@@ -92,15 +92,7 @@ export const createWebDAVProvider = (settings: WebDAVSettings): FileSyncProvider
+     provider.uploadStream = async (remotePath, localPath) => {
+       const url = buildRequestUrl(settings.serverUrl, remotePath);
+       try {
+-        // tauriUpload's TS type says Map, but the Rust command accepts a JSON
+-        // object → HashMap<String, String>; pass the headers object directly.
+-        await tauriUpload(
+-          url,
+-          localPath,
+-          'PUT',
+-          undefined,
+-          authHeaders() as unknown as Map<string, string>,
+-        );
++        await tauriUpload(url, localPath, 'PUT', undefined, authHeaders());
+         return true;
+       } catch (e) {
+         console.warn('WebDAVProvider.uploadStream failed', remotePath, e);
+diff --git a/apps/readest-app/src/services/transferManager.ts b/apps/readest-app/src/services/transferManager.ts
+index 6ce3ba8db..5f5a9b827 100644
+--- a/apps/readest-app/src/services/transferManager.ts
++++ b/apps/readest-app/src/services/transferManager.ts
+@@ -465,7 +465,14 @@ class TransferManager {
+         return;
+       }
+ 
+-      const errorMessage = error instanceof Error ? error.message : _('Unknown error');
++      const errorMessage =
++        error instanceof Error
++          ? error.message
++          : typeof error === 'string' && error
++            ? error
++            : error && typeof error === 'object' && 'message' in error
++              ? String((error as { message: unknown }).message)
++              : _('Unknown error');
+       const currentStore = useTransferStore.getState();
+       const currentTransfer = currentStore.transfers[transfer.id];
+ 
+@@ -509,7 +516,7 @@ class TransferManager {
+ 
+             eventDispatcher.dispatch('toast', {
+               type: 'error',
+-              message: errorMessages[transfer.type],
++              message: `${errorMessages[transfer.type]}\n${errorMessage}`,
+             });
+           }
+         }
+diff --git a/apps/readest-app/src/utils/access.ts b/apps/readest-app/src/utils/access.ts
+index 5b69e2ad6..f73168f4a 100644
+--- a/apps/readest-app/src/utils/access.ts
++++ b/apps/readest-app/src/utils/access.ts
+@@ -1,5 +1,7 @@
+ import { jwtDecode } from 'jwt-decode';
+-import { supabase } from '@/utils/supabase';
++import type { User } from '@supabase/supabase-js';
++import { supabase, SELFHOSTED } from '@/utils/supabase';
++import { jwtToUser, SelfhostedUser } from '@/services/selfhostedAuth';
+ import { UserPlan } from '@/types/quota';
+ import { DEFAULT_DAILY_TRANSLATION_QUOTA, DEFAULT_STORAGE_QUOTA } from '@/services/constants';
+ import { isWebAppPlatform } from '@/services/environment';
+@@ -152,33 +154,55 @@ export const getDailyTranslationPlanData = (token: string) => {
+ };
+ 
+ export const getAccessToken = async (): Promise<string | null> => {
++  // Self-hosted mode: the JWT issued by the sync server is the single source
++  // of truth and lives in localStorage, identical for every app route instance.
++  if (SELFHOSTED) {
++    return localStorage.getItem('token') ?? null;
++  }
+   // In browser context there might be two instances of supabase one in the app route
+   // and the other in the pages route, and they might have different sessions
+   // making the access token invalid for API calls. In that case we should use localStorage.
+   if (isWebAppPlatform()) {
+     return localStorage.getItem('token') ?? null;
+   }
+-  const { data } = await supabase.auth.getSession();
++  const { data } = await supabase!.auth.getSession();
+   return data?.session?.access_token ?? null;
+ };
+ 
+ export const getUserID = async (): Promise<string | null> => {
++  if (SELFHOSTED) {
++    return jwtToUser(localStorage.getItem('token'))?.id ?? null;
++  }
+   if (isWebAppPlatform()) {
+     const user = localStorage.getItem('user') ?? '{}';
+-    return JSON.parse(user).id ?? null;
++    try {
++      return JSON.parse(user)?.id ?? null;
++    } catch {
++      // A corrupted 'user' payload (e.g. stored as "[object Object]") must
++      // not crash startup; treat it as signed-out.
++      return null;
++    }
+   }
+-  const { data } = await supabase.auth.getSession();
++  const { data } = await supabase!.auth.getSession();
+   return data?.session?.user?.id ?? null;
+ };
+ 
+-export const validateUserAndToken = async (authHeader: string | null | undefined) => {
++export const validateUserAndToken = async (
++  authHeader: string | null | undefined,
++): Promise<{ user?: User | SelfhostedUser; token?: string }> => {
+   if (!authHeader) return {};
+ 
+   const token = authHeader.replace('Bearer ', '');
++  // Self-hosted mode: derive the user from the JWT `sub` claim directly.
++  if (SELFHOSTED) {
++    const user = jwtToUser(token);
++    if (!user) return {};
++    return { user, token };
++  }
+   const {
+     data: { user },
+     error,
+-  } = await supabase.auth.getUser(token);
++  } = await supabase!.auth.getUser(token);
+ 
+   if (error || !user) return {};
+   return { user, token };
+diff --git a/apps/readest-app/src/utils/supabase.ts b/apps/readest-app/src/utils/supabase.ts
+index 9fcab8a26..a50c442d2 100644
+--- a/apps/readest-app/src/utils/supabase.ts
++++ b/apps/readest-app/src/utils/supabase.ts
+@@ -1,18 +1,41 @@
+-import { createClient } from '@supabase/supabase-js';
++import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+ import { getRuntimeConfig } from '@/services/runtimeConfig';
+ 
+-const supabaseUrl =
+-  getRuntimeConfig()?.supabaseUrl ||
+-  process.env['SUPABASE_URL'] ||
+-  process.env['NEXT_PUBLIC_SUPABASE_URL'] ||
+-  atob(process.env['NEXT_PUBLIC_DEFAULT_SUPABASE_URL_BASE64']!);
+-const supabaseAnonKey =
+-  getRuntimeConfig()?.supabaseAnonKey ||
+-  process.env['SUPABASE_ANON_KEY'] ||
+-  process.env['NEXT_PUBLIC_SUPABASE_ANON_KEY'] ||
+-  atob(process.env['NEXT_PUBLIC_DEFAULT_SUPABASE_KEY_BASE64']!);
++/**
++ * Self-hosted mode toggle. When set (`NEXT_PUBLIC_SELFHOSTED=1`), the app talks
++ * to a self-hosted Readest sync server (code login + JWT) instead of Supabase.
++ * The official Supabase path is preserved when this is off.
++ */
++export const SELFHOSTED = process.env['NEXT_PUBLIC_SELFHOSTED'] === '1';
+ 
+-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
++// In self-hosted mode the Supabase client is never used, so we skip resolving
++// the default base64 env vars (which may be absent and would crash atob() at
++// module load). The official path still reads them normally when SELFHOSTED off.
++const b64Url = process.env['NEXT_PUBLIC_DEFAULT_SUPABASE_URL_BASE64'];
++const b64Key = process.env['NEXT_PUBLIC_DEFAULT_SUPABASE_KEY_BASE64'];
++const supabaseUrl = SELFHOSTED
++  ? ''
++  : getRuntimeConfig()?.supabaseUrl ||
++    process.env['SUPABASE_URL'] ||
++    process.env['NEXT_PUBLIC_SUPABASE_URL'] ||
++    (b64Url ? atob(b64Url) : '');
++const supabaseAnonKey = SELFHOSTED
++  ? ''
++  : getRuntimeConfig()?.supabaseAnonKey ||
++    process.env['SUPABASE_ANON_KEY'] ||
++    process.env['NEXT_PUBLIC_SUPABASE_ANON_KEY'] ||
++    (b64Key ? atob(b64Key) : '');
++
++export const supabase: SupabaseClient | null = createSupabaseClientSafe();
++
++// Avoid calling createClient with empty url/key (which throws at module load
++// when the Supabase env vars are absent). The official path requires those vars
++// at runtime; if missing, callsites using `supabase!` will fail loudly.
++function createSupabaseClientSafe(): SupabaseClient | null {
++  if (SELFHOSTED) return null;
++  if (!supabaseUrl || !supabaseAnonKey) return null;
++  return createClient(supabaseUrl, supabaseAnonKey);
++}
+ 
+ export const createSupabaseClient = (accessToken?: string) => {
+   return createClient(supabaseUrl, supabaseAnonKey, {
+diff --git a/apps/readest-app/src/utils/transfer.ts b/apps/readest-app/src/utils/transfer.ts
+index 6b1d1c69b..9624bfd14 100644
+--- a/apps/readest-app/src/utils/transfer.ts
++++ b/apps/readest-app/src/utils/transfer.ts
+@@ -78,12 +78,23 @@ export const createProgressThrottle = (
+   };
+ };
+ 
+-export const webUpload = (file: File, uploadUrl: string, onProgress?: ProgressHandler) => {
++export const webUpload = (
++  file: File,
++  uploadUrl: string,
++  onProgress?: ProgressHandler,
++  headers?: Record<string, string>,
++) => {
+   return new Promise<void>((resolve, reject) => {
+     const startTime = Date.now();
+     const xhr = new XMLHttpRequest();
+     xhr.open('PUT', uploadUrl, true);
+ 
++    if (headers) {
++      for (const [name, value] of Object.entries(headers)) {
++        if (value) xhr.setRequestHeader(name, value);
++      }
++    }
++
+     xhr.upload.onprogress = (event) => {
+       if (onProgress && event.lengthComputable) {
+         onProgress({
+@@ -161,7 +172,7 @@ export const tauriUpload = async (
+   filePath: string,
+   method: UploadMethod,
+   progressHandler?: ProgressHandler,
+-  headers?: Map<string, string>,
++  headers?: Record<string, string>,
+ ): Promise<string> => {
+   const ids = new Uint32Array(1);
+   window.crypto.getRandomValues(ids);
