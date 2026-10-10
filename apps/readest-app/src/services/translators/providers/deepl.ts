@@ -6,7 +6,7 @@ import { getSubscriptionPlan, getTranslationQuota } from '@/utils/access';
 import { normalizeToShortLang } from '@/utils/lang';
 import { saveDailyUsage } from '../utils';
 
-const DEEPL_API_ENDPOINT = getAPIBaseUrl() + '/deepl/translate';
+const deeplAPIEndpoint = () => getAPIBaseUrl() + '/deepl/translate';
 
 /**
  * DeepL language codes are upper-case, but the service answers 500 when the
@@ -72,7 +72,7 @@ export const deeplProvider: TranslationProvider = {
 
     const quota = getTranslationQuota(userPlan);
     try {
-      const response = await fetch(DEEPL_API_ENDPOINT, { method: 'POST', headers, body });
+      const response = await fetch(deeplAPIEndpoint(), { method: 'POST', headers, body });
 
       if (!response.ok) {
         const data = await response.json();

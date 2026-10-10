@@ -2,8 +2,8 @@ import { getAPIBaseUrl } from '@/services/environment';
 import { getUserID } from '@/utils/access';
 import { fetchWithAuth } from '@/utils/fetch';
 
-const API_ENDPOINT = getAPIBaseUrl() + '/user/delete';
-const LIBRARY_API_ENDPOINT = getAPIBaseUrl() + '/user/library';
+const userAPIEndpoint = () => getAPIBaseUrl() + '/user/delete';
+const libraryAPIEndpoint = () => getAPIBaseUrl() + '/user/library';
 
 export const deleteUser = async () => {
   try {
@@ -12,7 +12,7 @@ export const deleteUser = async () => {
       throw new Error('Not authenticated');
     }
 
-    await fetchWithAuth(API_ENDPOINT, {
+    await fetchWithAuth(userAPIEndpoint(), {
       method: 'DELETE',
     });
   } catch (error) {
@@ -28,7 +28,7 @@ export const deleteCloudLibrary = async () => {
       throw new Error('Not authenticated');
     }
 
-    await fetchWithAuth(LIBRARY_API_ENDPOINT, {
+    await fetchWithAuth(libraryAPIEndpoint(), {
       method: 'DELETE',
     });
   } catch (error) {

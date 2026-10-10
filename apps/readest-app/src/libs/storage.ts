@@ -29,13 +29,28 @@ const buildBlobAuthHeaders = async (url: string): Promise<Record<string, string>
   return token ? { Authorization: `Bearer ${token}` } : {};
 };
 
+// Resolved lazily via getters: in self-hosted mode the server URL is entered
+// at login and persisted in localStorage, which happens AFTER this module is
+// first imported on web — a module-load constant would pin web.readest.com.
 const API_ENDPOINTS = {
-  upload: getAPIBaseUrl() + '/storage/upload',
-  download: getAPIBaseUrl() + '/storage/download',
-  delete: getAPIBaseUrl() + '/storage/delete',
-  stats: getAPIBaseUrl() + '/storage/stats',
-  list: getAPIBaseUrl() + '/storage/list',
-  purge: getAPIBaseUrl() + '/storage/purge',
+  get upload() {
+    return getAPIBaseUrl() + '/storage/upload';
+  },
+  get download() {
+    return getAPIBaseUrl() + '/storage/download';
+  },
+  get delete() {
+    return getAPIBaseUrl() + '/storage/delete';
+  },
+  get stats() {
+    return getAPIBaseUrl() + '/storage/stats';
+  },
+  get list() {
+    return getAPIBaseUrl() + '/storage/list';
+  },
+  get purge() {
+    return getAPIBaseUrl() + '/storage/purge';
+  },
 };
 
 export const createProgressHandler = (
@@ -84,7 +99,7 @@ export const uploadFile = async (
       await response.json();
     const blobHeaders = await buildBlobAuthHeaders(uploadUrl);
     if (isWebAppPlatform()) {
-      await webUpload(file, uploadUrl, onProgress, blobHeaders);
+      await webUpload(file, toFullUrl(uploadUrl), onProgress, blobHeaders);
     } else {
       await tauriUpload(toFullUrl(uploadUrl), fileFullPath, 'PUT', onProgress, blobHeaders);
     }
@@ -129,7 +144,7 @@ export const uploadReplicaFile = async (
     const { uploadUrl }: { uploadUrl: string } = await response.json();
     const blobHeaders = await buildBlobAuthHeaders(uploadUrl);
     if (isWebAppPlatform()) {
-      await webUpload(file, uploadUrl, onProgress, blobHeaders);
+      await webUpload(file, toFullUrl(uploadUrl), onProgress, blobHeaders);
     } else {
       await tauriUpload(toFullUrl(uploadUrl), fileFullPath, 'PUT', onProgress, blobHeaders);
     }
@@ -219,7 +234,7 @@ export const downloadFile = async ({
     const mergedHeaders = { ...blobAuthHeaders, ...headers };
     if (isWebAppPlatform()) {
       const { headers: responseHeaders, blob } = await webDownload(
-        downloadUrl,
+        toFullUrl(downloadUrl),
         onProgress,
         mergedHeaders,
       );

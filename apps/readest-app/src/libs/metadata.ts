@@ -10,10 +10,10 @@ interface ApiResponse<T> {
   responseTime?: number;
 }
 
-const API_ENDPOINT = getAPIBaseUrl() + '/metadata/search';
+const metadataAPIEndpoint = () => getAPIBaseUrl() + '/metadata/search';
 
 export const searchMetadata = async (request: SearchRequest): Promise<MetadataResult[]> => {
-  const response = await fetchWithAuth(API_ENDPOINT, {
+  const response = await fetchWithAuth(metadataAPIEndpoint(), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

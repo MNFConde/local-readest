@@ -21,12 +21,13 @@ git apply --3way docs/selfhosted/readest-client-selfhost.patch   # 解 6+ 文件
 基线：官方 `ac757777d`（merge-base），提取时官方已领先 478 提交——**冲突大概率集中在文件级重排，机械解决即可；若官方改了同步语义需产品裁决，停下讨论**。
 
 收录（自托管核心）：
+- `src/services/environment.ts`：`getBaseUrl()` 自托管地址优先（登录时录入，localStorage 持久化）——**漏掉它会让 sync/storage 全部静默回退官方域名**（T10 E2E 抓到过）
 - `src/services/selfhostedAuth.ts`、`selfhostedServerUrl.ts`（新增）：登录码 → `POST /api/auth` 换 JWT；运行时录入服务端地址（localStorage 持久化，免按用户编译）
 - `src/utils/supabase.ts`：`NEXT_PUBLIC_SELFHOSTED=1` 开关；selfhost 下 supabase client 为 null（调用点 `supabase!`）
 - `src/utils/access.ts`、`src/helpers/auth.ts`、`src/context/AuthContext.tsx`：token/用户派生走 JWT `sub`；过期后用持久化登录码静默重登
 - `src/app/auth/*`（AuthPanel / EmailPasswordAuth / page / recovery / update）：登录 UI——服务端地址框 + 登录码框（密码框复用），隐藏 OAuth
 - `src/hooks/useQuotaStats.ts`、`useAvailablePlans.ts`：配额走自建服务端；跳过 Stripe/IAP
-- `src/libs/storage.ts`、`src/utils/transfer.ts`、三个 sync provider：本地磁盘 blob URL（相对路径）带 Bearer 头上传/下载；`tauriUpload` headers 类型修正为 `Record`
+- `src/libs/storage.ts`、`src/libs/sync.ts`、`src/libs/share.ts`、`src/libs/user.ts`、`src/libs/metadata.ts`、`src/services/translators/providers/deepl.ts`：**API 端点一律调用时求值**（模块级常量会在登录前固化为官方域名）+ blob 相对 URL 经 `toFullUrl` 拼接且带 Bearer 头（web 的 XHR 分支也必须走 `toFullUrl`）；`src/utils/transfer.ts`、三个 sync provider：`tauriUpload` headers 类型修正为 `Record`
 - `src/services/transferManager.ts`：错误信息透传（利于排障自建服务端错误）
 - `src-tauri/src/transfer_file.rs` + `Cargo.toml`（tokio `time`）：分块下载失败重试/严格 206 校验/失败即中止删残片——对家庭宽带自建服务端重要
 - `src/__tests__/utils/selfhostedAuth.test.ts`、`helpers/auth.test.ts`、`helpers/supabase-mock.ts`

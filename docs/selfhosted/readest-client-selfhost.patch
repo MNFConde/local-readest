@@ -2,7 +2,7 @@
 # 基线: 官方 ac757777d fix(library): optimize bookshelf covers in background, closes #5632 (#5731) (merge-base, 2026-10 时官方领先该基线 478 提交)
 # 提取: 2026-10-11 于 ywz master 87885d3e0
 # 用法: git apply --3way docs/selfhosted/readest-client-selfhost.patch（需先 git fetch official main 提供 pre-image blob）
-# 收录: 自托管核心（auth/supabase/access/storage/transfer/登录UI/配额/分块下载健壮性）
+# 收录: 自托管核心（auth/supabase/access/environment/storage/transfer/登录UI/配额/分块下载健壮性）
 # 排除: ywz 的 pinnedAt/libraryPinnedGroups/统计页/OPDS 功能、Android 品牌改造(com.ywz626.readest.sh)、
 #       layout.tsx polyfill、locale 文件（登录 UI 英文回退，可按需补 zh-CN）、package.json/tauri.conf.json
 #       （server 构建脚本与 SELFHOSTED env 由 .env.local + 手工脚本提供，见同目录 README.md）
@@ -1145,6 +1145,44 @@ index 8d0b0e0a5..d1df2df37 100644
          undefined,
          singleThreaded,
          skipSslVerification,
+diff --git a/apps/readest-app/src/services/environment.ts b/apps/readest-app/src/services/environment.ts
+index cd0209f2e..de05fdb56 100644
+--- a/apps/readest-app/src/services/environment.ts
++++ b/apps/readest-app/src/services/environment.ts
+@@ -1,6 +1,8 @@
+ import { AppService } from '@/types/system';
+ import { READEST_NODE_BASE_URL, READEST_WEB_BASE_URL } from './constants';
+ import { getRuntimeConfig } from './runtimeConfig';
++import { SELFHOSTED } from '@/utils/supabase';
++import { getSelfhostedServerUrl } from './selfhostedServerUrl';
+ 
+ declare global {
+   interface Window {
+@@ -12,11 +14,19 @@ export const isTauriAppPlatform = () => process.env['NEXT_PUBLIC_APP_PLATFORM']
+ export const isWebAppPlatform = () => process.env['NEXT_PUBLIC_APP_PLATFORM'] === 'web';
+ export const hasCli = () => window.__READEST_CLI_ACCESS === true;
+ export const isPWA = () => window.matchMedia('(display-mode: standalone)').matches;
+-export const getBaseUrl = () =>
+-  getRuntimeConfig()?.apiBaseUrl ??
+-  process.env['API_BASE_URL'] ??
+-  process.env['NEXT_PUBLIC_API_BASE_URL'] ??
+-  READEST_WEB_BASE_URL;
++export const getBaseUrl = () => {
++  // Self-hosted mode: a runtime-entered server URL (persisted at login) takes
++  // priority so a pre-built installer works without per-user rebuilds. It is
++  // read lazily so changes at login take effect for every later API call.
++  const selfhostedUrl = SELFHOSTED ? getSelfhostedServerUrl() : '';
++  return (
++    selfhostedUrl ||
++    getRuntimeConfig()?.apiBaseUrl ||
++    process.env['API_BASE_URL'] ||
++    process.env['NEXT_PUBLIC_API_BASE_URL'] ||
++    READEST_WEB_BASE_URL
++  );
++};
+ export const getNodeBaseUrl = () =>
+   process.env['NEXT_PUBLIC_NODE_BASE_URL'] ?? READEST_NODE_BASE_URL;
+ 
 diff --git a/apps/readest-app/src/services/selfhostedAuth.ts b/apps/readest-app/src/services/selfhostedAuth.ts
 new file mode 100644
 index 000000000..e8bd61f2c
