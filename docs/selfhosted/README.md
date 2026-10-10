@@ -48,7 +48,7 @@ git apply --3way docs/selfhosted/readest-client-selfhost.patch   # 解 6+ 文件
 ## 重生成补丁
 
 ```bash
-cd tmp/readest-selfhosted          # ywz 仓库 clone（untracked，随用随更新）
+cd ../ywz-readest-selfhosted       # ywz 仓库 clone（已移出仓库：D:CodeProjectywz-readest-selfhosted）
 git remote add official https://github.com/readest/readest.git && git fetch official main
 BASE=$(git merge-base official/main master)
 git diff $BASE..master -- <README 上列出的收录文件清单> > body.patch
