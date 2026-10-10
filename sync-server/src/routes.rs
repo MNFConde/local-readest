@@ -8,6 +8,20 @@ pub fn router(state: SharedState) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/auth", post(crate::auth::login))
+        .route(
+            "/api/sync",
+            get(crate::sync::sync_pull).post(crate::sync::sync_push),
+        )
+        .route(
+            "/api/sync/replicas",
+            get(crate::sync::replicas_get).post(crate::sync::replicas_post),
+        )
+        .route(
+            "/api/sync/replica-keys",
+            get(crate::sync::replica_keys_get)
+                .post(crate::sync::replica_keys_post)
+                .delete(crate::sync::replica_keys_delete),
+        )
         .with_state(state)
 }
 

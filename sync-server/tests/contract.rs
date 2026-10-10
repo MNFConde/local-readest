@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sync_server::db::{self, AppState, SharedState};
 use sync_server::{config::Config, routes};
 use tower::ServiceExt;
@@ -217,4 +217,345 @@ async fn disabled_user_cannot_login() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+// ── sync (T6) ─────────────────────────────────────────────────────────────
+
+const SECRET: &str = "test-secret-0123456789abcdef";
+
+fn token_for(state: &SharedState, uid: &str) -> String {
+    sync_server::jwt::issue(&state.cfg.jwt_secret, uid, Some(uid), "pro").unwrap()
+}
+
+#[tokio::test]
+async fn sync_push_book_then_pull_returns_db_shape() {
+    let state = test_state(test_config("sync-book"));
+    let uid = "user-1";
+    let token = token_for(&state, uid);
+
+    let book = serde_json::json!({
+        "hash": "abc123", "format": "EPUB", "title": "T\u{0000}itle", "author": "Auth",
+        "metaHash": "m1", "groupId": "g1",
+        "metadata": { "title": "Meta" },
+        "createdAt": 1_700_000_000_000i64, "updatedAt": 1_700_000_000_500i64
+    });
+    let app = routes::router(state.clone());
+    let (status, body, _) = request(
+        app,
+        "POST",
+        "/api/sync",
+        Some(&token),
+        Some(json!({ "books": [book] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({}));
+
+    let app = routes::router(state.clone());
+    let (status, body, _) = request(
+        app,
+        "GET",
+        "/api/sync?since=0&type=books",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let books = body["books"].as_array().expect("books array");
+    assert_eq!(books.len(), 1);
+    let b = &books[0];
+    assert_eq!(b["book_hash"], "abc123");
+    assert_eq!(b["meta_hash"], "m1");
+    assert_eq!(b["group_id"], "g1");
+    assert_eq!(b["title"], "Title");
+    assert_eq!(
+        b["metadata"],
+        serde_json::json!({"title": "Meta"}).to_string()
+    );
+    assert_eq!(b["created_at"], "2023-11-14T22:13:20Z");
+    assert_eq!(b["user_id"], uid);
+    assert!(b.get("hash").is_none(), "no camelCase fields in DB shape");
+    for key in ["notes", "configs", "statBooks", "statPages"] {
+        assert_eq!(body[key], json!([]), "empty {key}");
+    }
+}
+
+#[tokio::test]
+async fn sync_config_progress_piggybacks_onto_book_row() {
+    let state = test_state(test_config("sync-piggy"));
+    let uid = "user-2";
+    let token = token_for(&state, uid);
+
+    let app = routes::router(state.clone());
+    let (status, _, _) = request(
+        app,
+        "POST",
+        "/api/sync",
+        Some(&token),
+        Some(json!({
+            "books": [{ "hash": "bk1", "title": "B", "updatedAt": 1_000_000 }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let app = routes::router(state.clone());
+    let (status, _, _) = request(app, "POST", "/api/sync", Some(&token), Some(json!({
+        "configs": [{ "bookHash": "bk1", "progress": { "location": "p3" }, "updatedAt": 2_000_000 }]
+    }))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let app = routes::router(state.clone());
+    let (status, body, _) = request(
+        app,
+        "GET",
+        "/api/sync?type=books&since=0",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let book = &body["books"][0];
+    assert_eq!(
+        book["progress"],
+        serde_json::json!({"location": "p3"}),
+        "config progress must ride along onto the book row"
+    );
+    assert_eq!(book["updated_at"], "1970-01-01T00:33:20Z");
+}
+
+#[tokio::test]
+async fn sync_notes_lww_and_deletion_propagate() {
+    let state = test_state(test_config("sync-notes"));
+    let uid = "user-3";
+    let token = token_for(&state, uid);
+    let note = |text: &str, updated: i64, deleted: Option<i64>| {
+        json!({ "id": "n1", "bookHash": "bh", "type": "highlight", "text": text,
+                "updatedAt": updated, "deletedAt": deleted })
+    };
+
+    let app = routes::router(state.clone());
+    let (_, _, _) = request(
+        app,
+        "POST",
+        "/api/sync",
+        Some(&token),
+        Some(json!({ "notes": [note("v1", 100, None)] })),
+    )
+    .await;
+    let app = routes::router(state.clone());
+    let (_, _, _) = request(
+        app,
+        "POST",
+        "/api/sync",
+        Some(&token),
+        Some(json!({ "notes": [note("v0-stale", 50, None)] })),
+    )
+    .await;
+    let app = routes::router(state.clone());
+    let (status, body, _) = request(
+        app,
+        "GET",
+        "/api/sync?type=notes&since=0",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["notes"][0]["text"], "v1");
+    assert_eq!(body["notes"][0]["updated_at"], 100);
+
+    let app = routes::router(state.clone());
+    let (_, _, _) = request(
+        app,
+        "POST",
+        "/api/sync",
+        Some(&token),
+        Some(json!({ "notes": [note("", 200, Some(200))] })),
+    )
+    .await;
+    let app = routes::router(state.clone());
+    let (_, body, _) = request(
+        app,
+        "GET",
+        "/api/sync?type=notes&since=150",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(
+        body["notes"].as_array().unwrap().len(),
+        1,
+        "deleted note must appear after cursor"
+    );
+    assert_eq!(body["notes"][0]["deleted_at"], 200);
+}
+
+#[tokio::test]
+async fn sync_books_field_graft_preserves_metadata_clock_edits() {
+    let state = test_state(test_config("sync-merge"));
+    let uid = "user-4";
+    let token = token_for(&state, uid);
+
+    let app = routes::router(state.clone());
+    let (_, _, _) = request(
+        app,
+        "POST",
+        "/api/sync",
+        Some(&token),
+        Some(json!({
+            "books": [{ "hash": "m1", "title": "T", "metadata": { "v": 1 },
+                        "metadataUpdatedAt": 1_000, "updatedAt": 1_000 }]
+        })),
+    )
+    .await;
+    let app = routes::router(state.clone());
+    let (_, _, _) = request(
+        app,
+        "POST",
+        "/api/sync",
+        Some(&token),
+        Some(json!({
+            "books": [{ "hash": "m1", "title": "T", "updatedAt": 2_000 }]
+        })),
+    )
+    .await;
+    let app = routes::router(state.clone());
+    let (_, body, _) = request(
+        app,
+        "GET",
+        "/api/sync?type=books&since=0",
+        Some(&token),
+        None,
+    )
+    .await;
+    let book = &body["books"][0];
+    assert_eq!(
+        book["metadata"],
+        serde_json::json!({"v": 1}).to_string(),
+        "row clock winner must not drop metadata-clock edits"
+    );
+}
+
+#[tokio::test]
+async fn sync_replicas_upsert_filter_and_batch() {
+    let state = test_state(test_config("sync-replicas"));
+    let uid = "user-5";
+    let token = token_for(&state, uid);
+    let row = |replica_id: &str, ts: &str| {
+        json!({
+            "kind": "reader", "replica_id": replica_id,
+            "fields_jsonb": { "page": 3 }, "manifest_jsonb": { "keys": [] },
+            "updated_at_ts": ts, "schema_version": 1
+        })
+    };
+
+    let app = routes::router(state.clone());
+    let (status, body, _) = request(
+        app,
+        "POST",
+        "/api/sync/replicas",
+        Some(&token),
+        Some(json!({ "rows": [row("r1", "hlc-002"), row("r2", "hlc-001")] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let app = routes::router(state.clone());
+    let (status, body, _) = request(
+        app,
+        "GET",
+        "/api/sync/replicas?kind=reader&since=hlc-001",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = body["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "since filter is strict >");
+    assert_eq!(rows[0]["replica_id"], "r1", "strictly newer than since");
+    assert_eq!(rows[0]["fields_jsonb"]["page"], 3);
+
+    let app = routes::router(state.clone());
+    let (_, _, _) = request(
+        app,
+        "POST",
+        "/api/sync/replicas",
+        Some(&token),
+        Some(json!({ "rows": [row("r2", "hlc-000")] })),
+    )
+    .await;
+    let app = routes::router(state.clone());
+    let (_, body, _) = request(
+        app,
+        "GET",
+        "/api/sync/replicas?kind=reader",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(
+        body["rows"][0]["updated_at_ts"], "hlc-001",
+        "stale HLC push must lose"
+    );
+
+    let app = routes::router(state.clone());
+    let (status, body, _) = request(
+        app,
+        "POST",
+        "/api/sync/replicas",
+        Some(&token),
+        Some(json!({ "cursors": [ { "kind": "reader" } ] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results[0]["kind"], "reader");
+    assert_eq!(results[0]["rows"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn sync_replica_keys_crud() {
+    let state = test_state(test_config("sync-keys"));
+    let uid = "user-6";
+    let token = token_for(&state, uid);
+
+    let app = routes::router(state.clone());
+    let (status, body, _) = request(
+        app,
+        "POST",
+        "/api/sync/replica-keys",
+        Some(&token),
+        Some(json!({ "alg": "PBKDF2" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let salt_id = body["row"]["saltId"].as_str().unwrap().to_string();
+    assert!(!body["row"]["salt"].as_str().unwrap().is_empty());
+
+    let app = routes::router(state.clone());
+    let (_, body, _) = request(app, "GET", "/api/sync/replica-keys", Some(&token), None).await;
+    assert_eq!(body["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(body["rows"][0]["saltId"], salt_id.as_str());
+
+    let app = routes::router(state.clone());
+    let (status, _, _) = request(app, "DELETE", "/api/sync/replica-keys", Some(&token), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let app = routes::router(state);
+    let (_, body, _) = request(app, "GET", "/api/sync/replica-keys", Some(&token), None).await;
+    assert_eq!(body["rows"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn sync_requires_bearer_token() {
+    let state = test_state(test_config("sync-auth"));
+    let app = routes::router(state.clone());
+    let (status, body, _) = request(app, "GET", "/api/sync?since=0", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "AUTH");
+
+    let app = routes::router(state);
+    let (status, body, _) = request(app, "GET", "/api/sync?since=0", Some("not-a-jwt"), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body, json!({ "error": "invalid token", "code": "AUTH" }));
 }

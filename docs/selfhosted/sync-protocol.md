@@ -65,7 +65,7 @@ JWT（HS256）claims：`sub`（用户标识 = 数据隔离键）、`plan: "pro"`
 | `metadata`（对象） | `metadata`（字符串） | JSON 序列化；null → 缺省 |
 | `createdAt/updatedAt/deletedAt/readingStatusUpdatedAt/coverUpdatedAt/metadataUpdatedAt/uploadedAt/pinnedAt`（epoch ms） | 同名 snake（`created_at` 等） | → RFC3339 UTC 字符串（config 例外：`created_at/updated_at/deleted_at` 保持 epoch ms 整数）；缺省时间戳用当前 ms |
 | `title/sourceTitle/author/groupName` | 同名 snake | 去 `\u0000`（sanitize） |
-| `progress/viewSettings`（对象） | 同名 snake（字符串） | JSON 序列化 |
+| `progress/viewSettings`（对象） | 同名 snake | **book 行内为原始 JSON 值**（Go `json.RawMessage`，保持子对象形态）；config 内为 JSON 字符串（`*string`）。注意两者不同 |
 | — | `user_id`、`synced_at` | 服务端填（uid；RFC3339 当前时刻） |
 
 note/config 的字段一一对应（note: `id,type,cfi,xpointer0/1,page,text,style,color,note,global` → snake，`text/note` sanitize，时间戳保持 ms；config: `bookHash,metaHash,progress,location,xpointer,rsvpPosition,searchConfig,viewSettings,updatedAt`，子对象序列化为字符串）。
