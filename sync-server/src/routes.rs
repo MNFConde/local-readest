@@ -1,8 +1,47 @@
+use axum::extract::Request;
+use axum::http::{header, Method, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{any, delete, get, post, put};
 use axum::{Json, Router};
 use serde_json::json;
 
 use crate::db::SharedState;
+
+/// CORS for browser clients (the Tauri shell and curl send no Origin). Mirrors
+/// the reference: reflect any Origin, allow the client's headers, expose
+/// Retry-After, and answer preflights with 204.
+async fn cors(req: Request, next: Next) -> Response {
+    let origin = req
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("*")
+        .to_string();
+    let is_preflight = req.method() == Method::OPTIONS;
+    let mut resp = if is_preflight {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        next.run(req).await.into_response()
+    };
+    let headers = resp.headers_mut();
+    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin.parse().unwrap());
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        "GET, POST, PUT, DELETE, OPTIONS".parse().unwrap(),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        "Authorization, Content-Type, X-Device-Id, Accept, Origin"
+            .parse()
+            .unwrap(),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        "Retry-After".parse().unwrap(),
+    );
+    resp
+}
 
 pub fn router(state: SharedState) -> Router {
     Router::new()
@@ -42,6 +81,7 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/api/tts/edge", any(crate::proxy::edge_tts))
         .route("/api/metadata/search", get(crate::proxy::metadata_search))
+        .layer(middleware::from_fn(cors))
         .with_state(state)
 }
 
