@@ -559,3 +559,234 @@ async fn sync_requires_bearer_token() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body, json!({ "error": "invalid token", "code": "AUTH" }));
 }
+
+// ── storage (T7) ──────────────────────────────────────────────────────────
+
+async fn put_blob(
+    app: axum::Router,
+    token: &str,
+    key: &str,
+    data: Vec<u8>,
+) -> (StatusCode, Value, axum::http::HeaderMap) {
+    let req = axum::http::Request::builder()
+        .method("PUT")
+        .uri(format!("/api/storage/blob/{key}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Length", data.len().to_string())
+        .body(axum::body::Body::from(data))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    (status, Value::Null, resp.headers().clone())
+}
+
+#[tokio::test]
+async fn storage_upload_put_get_roundtrip_with_range() {
+    let state = test_state(test_config("storage-rt"));
+    let uid = "user-s1";
+    let token = token_for(&state, uid);
+    let key = format!("{uid}/Readest/Books/bh1/book.epub");
+
+    let app = routes::router(state.clone());
+    let (status, body, _) = request(
+        app,
+        "POST",
+        "/api/storage/upload",
+        Some(&token),
+        Some(json!({ "fileName": "Readest/Books/bh1/book.epub", "fileSize": 5 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let expected = format!("/api/storage/blob/{key}");
+    assert_eq!(body["uploadUrl"], expected.as_str());
+    assert_eq!(body["downloadUrl"], expected.as_str());
+
+    let data = b"hello".to_vec();
+    let app = routes::router(state.clone());
+    let (status, _, _) = put_blob(app, &token, &key, data).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // full GET
+    let req = axum::http::Request::builder()
+        .method("GET")
+        .uri(format!("/api/storage/blob/{key}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = routes::router(state.clone()).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&bytes[..], b"hello");
+
+    // ranged GET
+    let req = axum::http::Request::builder()
+        .method("GET")
+        .uri(format!("/api/storage/blob/{key}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Range", "bytes=1-3")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = routes::router(state.clone()).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(resp.headers()["Content-Range"], "bytes 1-3/5");
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&bytes[..], b"ell");
+
+    // unsatisfiable range
+    let req = axum::http::Request::builder()
+        .method("GET")
+        .uri(format!("/api/storage/blob/{key}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Range", "bytes=99-100")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = routes::router(state.clone()).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(resp.headers()["Content-Range"], "bytes */5");
+}
+
+#[tokio::test]
+async fn storage_blob_rejects_foreign_scope_and_traversal() {
+    let state = test_state(test_config("storage-scope"));
+    let token_a = token_for(&state, "user-a");
+    let token_b = token_for(&state, "user-b");
+    let foreign_key = "user-a/Readest/Books/x/f";
+
+    let app = routes::router(state.clone());
+    let (status, _, _) = put_blob(app, &token_b, foreign_key, b"x".to_vec()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // traversal folded under root never escapes, but a uid mismatch still 403s
+    let app = routes::router(state.clone());
+    let (status, _, _) = put_blob(app, &token_b, "../../etc/passwd", b"x".to_vec()).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "folded key loses the uid prefix"
+    );
+}
+
+#[tokio::test]
+async fn storage_list_stats_delete_purge_flow() {
+    let state = test_state(test_config("storage-list"));
+    let uid = "user-s2";
+    let token = token_for(&state, uid);
+
+    for (name, content) in [
+        ("Readest/Books/bh1/a.epub", "aaaa"),
+        ("Readest/Books/bh2/b.epub", "bb"),
+    ] {
+        let key = format!("{uid}/{name}");
+        let app = routes::router(state.clone());
+        let (status, _, _) = put_blob(app, &token, &key, content.as_bytes().to_vec()).await;
+        assert_eq!(status, StatusCode::OK, "{key}");
+    }
+
+    let app = routes::router(state.clone());
+    let (status, body, _) = request(app, "GET", "/api/storage/list", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let files = body["files"].as_array().unwrap();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0]["file_size"], 4, "files: {files:#?}");
+    assert_eq!(files[0]["book_hash"], "bh1");
+    assert_eq!(body["total"], 2);
+
+    let app = routes::router(state.clone());
+    let (_, body, _) = request(
+        app,
+        "GET",
+        "/api/storage/list?bookHash=bh2",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(body["files"].as_array().unwrap().len(), 1);
+    assert_eq!(body["files"][0]["book_hash"], "bh2");
+
+    let app = routes::router(state.clone());
+    let (status, body, _) = request(app, "GET", "/api/storage/stats", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["totalFiles"], 2);
+    assert_eq!(body["totalSize"], 6);
+    assert_eq!(body["quota"], 1024 * 1024i64);
+    let by_book = body["byBookHash"].as_array().unwrap();
+    assert_eq!(by_book.len(), 2);
+
+    let app = routes::router(state.clone());
+    let (status, _, _) = request(
+        app,
+        "GET",
+        &format!("/api/storage/download?fileKey={uid}/Readest/Books/bh1/a.epub"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // foreign scope refused for delete
+    let token_b = token_for(&state, "user-s3");
+    let app = routes::router(state.clone());
+    let (status, body, _) = request(
+        app,
+        "DELETE",
+        &format!("/api/storage/delete?fileKey={uid}/Readest/Books/bh1/a.epub"),
+        Some(&token_b),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "AUTH");
+
+    let app = routes::router(state.clone());
+    let (status, _, _) = request(
+        app,
+        "DELETE",
+        &format!("/api/storage/delete?fileKey={uid}/Readest/Books/bh1/a.epub"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let app = routes::router(state.clone());
+    let (status, body, _) = request(
+        app,
+        "DELETE",
+        "/api/storage/purge",
+        Some(&token),
+        Some(json!({ "fileKeys": [format!("{uid}/Readest/Books/bh2/b.epub"), "user-s3/secret"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["deletedCount"], 1);
+    assert_eq!(body["failedCount"], 1);
+    assert_eq!(body["failed"][0]["error"], "forbidden");
+}
+
+#[tokio::test]
+async fn storage_quota_enforced_on_blob_put() {
+    let state = test_state(test_config("storage-quota"));
+    let tiny = Config {
+        listen_addr: "127.0.0.1:0".into(),
+        jwt_secret: state.cfg.jwt_secret.clone(),
+        data_dir: state.cfg.data_dir.clone(),
+        quota_bytes: 8,
+        deepl_api_key: None,
+        deepl_endpoint: None,
+    };
+    let tiny_state = test_state(tiny);
+    let tiny_token = token_for(&tiny_state, "user-s4");
+    let app = routes::router(tiny_state);
+    let (status, body, _) =
+        put_blob(app, &tiny_token, "user-s4/Readest/Books/x/f", vec![0u8; 16]).await;
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "over-quota put must 413"
+    );
+    assert_eq!(body, Value::Null); // plain-body error path
+}

@@ -1,4 +1,4 @@
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde_json::json;
 
@@ -21,6 +21,19 @@ pub fn router(state: SharedState) -> Router {
             get(crate::sync::replica_keys_get)
                 .post(crate::sync::replica_keys_post)
                 .delete(crate::sync::replica_keys_delete),
+        )
+        .route("/api/storage/upload", post(crate::storage::upload))
+        .route(
+            "/api/storage/download",
+            get(crate::storage::download).post(crate::storage::download_batch),
+        )
+        .route("/api/storage/list", get(crate::storage::list))
+        .route("/api/storage/stats", get(crate::storage::stats))
+        .route("/api/storage/delete", delete(crate::storage::delete))
+        .route("/api/storage/purge", delete(crate::storage::purge))
+        .route(
+            "/api/storage/blob/{*key}",
+            put(crate::storage::blob_put).get(crate::storage::blob_get),
         )
         .with_state(state)
 }

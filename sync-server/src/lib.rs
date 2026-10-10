@@ -6,6 +6,7 @@ pub mod jwt;
 pub mod ratelimit;
 pub mod rfc3339;
 pub mod routes;
+pub mod storage;
 pub mod store;
 pub mod sync;
 pub mod transform;
