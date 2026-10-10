@@ -1,0 +1,69 @@
+use std::sync::Mutex;
+
+use rusqlite::Connection;
+
+use crate::config::Config;
+
+/// Application state shared by all handlers.
+///
+/// A single SQLite connection behind a mutex: home-scale traffic is tiny and
+/// the queries are sub-millisecond, so serializing them is fine and sidesteps
+/// WAL/busy handling entirely.
+pub struct AppState {
+    pub db: Mutex<Connection>,
+    pub cfg: Config,
+}
+
+pub type SharedState = std::sync::Arc<AppState>;
+
+/// Schema mirrors the ywz Go server's SQLite layout exactly (the wire contract
+/// lives in the JSON payloads; column names matter only server-side, but keep
+/// them identical anyway so operators can inspect both with the same queries).
+const SCHEMA: &str = r#"
+    CREATE TABLE IF NOT EXISTS books (
+        id TEXT, user_id TEXT, book_hash TEXT, meta_hash TEXT,
+        updated_at INTEGER, deleted_at INTEGER, synced_at TEXT, data TEXT,
+        PRIMARY KEY (user_id, book_hash)
+    );
+    CREATE TABLE IF NOT EXISTS notes (
+        user_id TEXT, note_id TEXT, updated_at INTEGER, deleted_at INTEGER, data TEXT,
+        PRIMARY KEY (user_id, note_id)
+    );
+    CREATE TABLE IF NOT EXISTS configs (
+        user_id TEXT, config_id TEXT, updated_at INTEGER, data TEXT,
+        PRIMARY KEY (user_id, config_id)
+    );
+    CREATE TABLE IF NOT EXISTS stat_books (
+        user_id TEXT, book_hash TEXT, title TEXT, authors TEXT, updated_at_ms INTEGER, deleted_at INTEGER,
+        PRIMARY KEY (user_id, book_hash)
+    );
+    CREATE TABLE IF NOT EXISTS stat_pages (
+        user_id TEXT, book_hash TEXT, page INTEGER, start_time INTEGER, duration INTEGER, total_pages INTEGER, updated_at_ms INTEGER, deleted_at INTEGER,
+        PRIMARY KEY (user_id, book_hash, page, start_time)
+    );
+    CREATE TABLE IF NOT EXISTS replicas (
+        user_id TEXT, kind TEXT, replica_id TEXT, fields_jsonb TEXT, manifest_jsonb TEXT, deleted_at_ts TEXT, reincarnation TEXT, updated_at_ts TEXT, schema_version INTEGER,
+        PRIMARY KEY (user_id, kind, replica_id)
+    );
+    CREATE TABLE IF NOT EXISTS replica_keys (
+        user_id TEXT, salt_id TEXT, alg TEXT, salt TEXT, created_at TEXT,
+        PRIMARY KEY (user_id, salt_id)
+    );
+"#;
+
+/// Open (creating if needed) the metadata database and bootstrap the schema.
+pub fn open_db(cfg: &Config) -> anyhow::Result<Connection> {
+    std::fs::create_dir_all(&cfg.data_dir)?;
+    let conn = Connection::open(cfg.db_path())?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    conn.execute_batch(SCHEMA)?;
+    Ok(conn)
+}
+
+/// Open an in-memory database with the full schema; used by contract tests.
+pub fn open_db_in_memory() -> anyhow::Result<Connection> {
+    let conn = Connection::open_in_memory()?;
+    conn.execute_batch(SCHEMA)?;
+    Ok(conn)
+}

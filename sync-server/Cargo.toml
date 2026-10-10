@@ -1,0 +1,37 @@
+[package]
+name = "sync-server"
+version = "0.1.0"
+edition = "2021"
+description = "Self-hosted Readest sync server (Rust rewrite of ywz626's readest-sync-server, with per-user accounts)"
+license = "AGPL-3.0"
+
+# Standalone crate: must NOT join the repo-root Tauri Cargo workspace.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+argon2 = { version = "0.5", features = ["std"] }
+axum = { version = "0.8", features = ["http1", "json", "query", "tokio"], default-features = true }
+dotenvy = "0.15"
+hex = "0.4"
+jsonwebtoken = "9"
+rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tower = { version = "0.5", features = ["util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# http-body-util for collecting oneshot response bodies in contract tests
+http-body-util = "0.1"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
