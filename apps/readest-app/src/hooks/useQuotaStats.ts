@@ -7,6 +7,8 @@ import {
   getTranslationPlanData,
   getUserProfilePlan,
 } from '@/utils/access';
+import { SELFHOSTED } from '@/utils/supabase';
+import { getStorageStats } from '@/libs/storage';
 import {
   setCachedCustomizationPurchased,
   setCachedUserPlan,
@@ -18,6 +20,8 @@ export const useQuotaStats = (briefName = false) => {
   const { token, user } = useAuth();
   const [quotas, setQuotas] = useState<QuotaType[]>([]);
   const [userProfilePlan, setUserProfilePlan] = useState<UserPlan | undefined>(undefined);
+  const [selfhostedStorageUsage, setSelfhostedStorageUsage] = useState<number | null>(null);
+
   // Derived, not state: state lags one render behind a token change, which
   // would briefly report the previous account's entitlement after a switch or
   // a sign-out.
@@ -25,6 +29,27 @@ export const useQuotaStats = (briefName = false) => {
     () => (token ? getCustomizationPurchased(token) : false),
     [token],
   );
+
+  // Self-hosted sync servers do not embed live usage in the JWT; fetch the
+  // actual server-side storage consumption so the menu reflects real usage.
+  useEffect(() => {
+    if (!SELFHOSTED || !token) return;
+
+    let cancelled = false;
+    getStorageStats()
+      .then((stats) => {
+        if (!cancelled) {
+          setSelfhostedStorageUsage(stats.usage);
+        }
+      })
+      .catch((error) => {
+        console.error('Failed to fetch self-hosted storage stats:', error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
 
   useEffect(() => {
     if (!user || !token) {
@@ -40,13 +65,18 @@ export const useQuotaStats = (briefName = false) => {
     }
 
     const storagPlan = getStoragePlanData(token);
+    // In self-hosted mode prefer the actual server-side usage over the static
+    // (often zero) value decoded from the JWT.
+    const storageUsage = SELFHOSTED
+      ? (selfhostedStorageUsage ?? storagPlan.usage)
+      : storagPlan.usage;
     const inGB = storagPlan.quota > 1e9;
     const storageQuota: QuotaType = {
       name: briefName ? _('Storage') : _('Cloud Sync Storage'),
       tooltip: _('{{percentage}}% of Cloud Sync Space Used.', {
-        percentage: Math.round((storagPlan.usage / storagPlan.quota) * 100),
+        percentage: Math.round((storageUsage / storagPlan.quota) * 100),
       }),
-      used: parseFloat((storagPlan.usage / 1024 / 1024 / (inGB ? 1024 : 1)).toFixed(2)),
+      used: parseFloat((storageUsage / 1024 / 1024 / (inGB ? 1024 : 1)).toFixed(2)),
       total: Math.round((storagPlan.quota / 1024 / 1024 / (inGB ? 1024 : 1)) * 10) / 10,
       unit: inGB ? 'GB' : 'MB',
     };
@@ -76,7 +106,7 @@ export const useQuotaStats = (briefName = false) => {
     setCachedCustomizationPurchased(customizationPurchased);
     setQuotas([storageQuota, translationQuota]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, customizationPurchased]);
+  }, [token, customizationPurchased, selfhostedStorageUsage]);
 
   return {
     quotas,
