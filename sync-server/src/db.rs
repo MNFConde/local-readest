@@ -12,6 +12,9 @@ use crate::config::Config;
 pub struct AppState {
     pub db: Mutex<Connection>,
     pub cfg: Config,
+    /// Brute-force lock state for POST /api/auth (in-memory by design: a
+    /// restart forgiving lockouts is acceptable for a self-hosted server).
+    pub login_limiter: Mutex<crate::ratelimit::LoginLimiter>,
 }
 
 pub type SharedState = std::sync::Arc<AppState>;
@@ -20,6 +23,15 @@ pub type SharedState = std::sync::Arc<AppState>;
 /// lives in the JSON payloads; column names matter only server-side, but keep
 /// them identical anyway so operators can inspect both with the same queries).
 const SCHEMA: &str = r#"
+    CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        code_sha256 TEXT NOT NULL,
+        code_argon2 TEXT NOT NULL,
+        plan TEXT NOT NULL DEFAULT 'pro',
+        disabled INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS books (
         id TEXT, user_id TEXT, book_hash TEXT, meta_hash TEXT,
         updated_at INTEGER, deleted_at INTEGER, synced_at TEXT, data TEXT,

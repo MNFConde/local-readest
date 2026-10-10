@@ -16,18 +16,10 @@ pub struct Config {
 const DEFAULT_QUOTA_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 
 impl Config {
-    /// # Errors
-    /// Returns an error when `JWT_SECRET` is absent: unlike the Go reference
-    /// (random secret per boot, silently invalidating all tokens) we require
-    /// it so restarts don't log every device out.
-    pub fn from_env() -> anyhow::Result<Self> {
+    /// Base config without the JWT requirement — used by CLI account
+    /// management, which doesn't touch tokens.
+    pub fn from_env_base() -> Self {
         let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
-
-        let jwt_secret = get("JWT_SECRET")
-            .filter(|s| s.len() >= 16)
-            .ok_or_else(|| {
-                anyhow::anyhow!("JWT_SECRET must be set (>=16 chars); tokens survive restarts only while it stays the same")
-            })?;
 
         let data_dir = PathBuf::from(get("DATA_DIR").unwrap_or_else(|| "./data".into()));
         let quota_bytes = get("QUOTA_BYTES")
@@ -35,14 +27,30 @@ impl Config {
             .filter(|q| *q > 0)
             .unwrap_or(DEFAULT_QUOTA_BYTES);
 
-        Ok(Self {
+        Self {
             listen_addr: get("LISTEN_ADDR").unwrap_or_else(|| ":8080".into()),
-            jwt_secret,
+            jwt_secret: String::new(),
             data_dir,
             quota_bytes,
             deepl_api_key: get("DEEPL_API_KEY"),
             deepl_endpoint: get("DEEPL_ENDPOINT"),
-        })
+        }
+    }
+
+    /// # Errors
+    /// Returns an error when `JWT_SECRET` is absent: unlike the Go reference
+    /// (random secret per boot, silently invalidating all tokens) we require
+    /// it so restarts don't log every device out.
+    pub fn from_env() -> anyhow::Result<Self> {
+        let mut cfg = Self::from_env_base();
+        let secret = std::env::var("JWT_SECRET")
+            .ok()
+            .filter(|v| !v.is_empty() && v.len() >= 16)
+            .ok_or_else(|| {
+                anyhow::anyhow!("JWT_SECRET must be set (>=16 chars); tokens survive restarts only while it stays the same")
+            })?;
+        cfg.jwt_secret = secret;
+        Ok(cfg)
     }
 
     pub fn db_path(&self) -> PathBuf {

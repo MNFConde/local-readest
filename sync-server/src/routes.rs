@@ -1,5 +1,4 @@
-
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
 
@@ -8,6 +7,7 @@ use crate::db::SharedState;
 pub fn router(state: SharedState) -> Router {
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/auth", post(crate::auth::login))
         .with_state(state)
 }
 

@@ -41,7 +41,9 @@ impl IntoResponse for ApiError {
             ApiError::InvalidToken => (StatusCode::UNAUTHORIZED, "AUTH", self.to_string()),
             ApiError::Forbidden => (StatusCode::FORBIDDEN, "AUTH", self.to_string()),
             ApiError::Validation => (StatusCode::BAD_REQUEST, "VALIDATION", self.to_string()),
-            ApiError::Locked { retry_after_secs: _ } => (
+            ApiError::Locked {
+                retry_after_secs: _,
+            } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "LOCKED",
                 "too many failures, device locked".into(),
@@ -58,7 +60,11 @@ impl IntoResponse for ApiError {
                 "internal server error".into(),
             ),
         };
-        let mut resp = (status, axum::Json(json!({ "error": message, "code": code }))).into_response();
+        let mut resp = (
+            status,
+            axum::Json(json!({ "error": message, "code": code })),
+        )
+            .into_response();
         if let ApiError::Locked { retry_after_secs } = self {
             resp.headers_mut().insert(
                 "Retry-After",
