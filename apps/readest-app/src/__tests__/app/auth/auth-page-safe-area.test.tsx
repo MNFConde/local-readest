@@ -13,6 +13,7 @@ vi.mock('@/context/AuthContext', () => ({
 }));
 
 vi.mock('@/utils/supabase', () => ({
+  SELFHOSTED: false,
   supabase: {
     auth: {
       onAuthStateChange: () => ({ data: { subscription: { unsubscribe: vi.fn() } } }),
