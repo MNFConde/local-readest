@@ -44,6 +44,37 @@ git apply --3way docs/selfhosted/readest-client-selfhost.patch   # 解 6+ 文件
    # NEXT_PUBLIC_API_BASE_URL 可留空：安装包支持登录时运行时输入服务端地址
    ```
 3. 服务端本体在 `sync-server/`（Rust，独立 crate，空 `[workspace]` 不进根 workspace），契约见 `sync-protocol.md`
+4. **Windows 宿主交叉编 Android**（上游 turso bug，Linux CI 不触发）：`turso_ext 0.6.1` 的 build.rs
+   用 `cfg!(target_os)`（判宿主）给链接塞 `-ladvapi32`，中间 cdylib `turso_sdk_kit` 链接时在
+   Android sysroot 找不到该库即失败。缓解双保险：①NDK sysroot 手工放空壳库（NDK 重装后重做）：
+   ```bash
+   STUB=apps/readest-app/src-tauri/android-stubs/libadvapi32.a
+   SYS=$NDK_HOME/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib
+   for d in aarch64-linux-android arm-linux-androideabi i686-linux-android x86_64-linux-android; do
+     cp "$STUB" "$SYS/$d/26/libadvapi32.a"; done
+   ```
+   ②`src-tauri/build.rs` 的 android 分支已注入 `android-stubs/` 搜索路径（管最终链接；上游修复后①②一并移除）。
+   桌面出包（Windows/NSIS）不需要这两步。
+5. **Windows 宿主出 Android 包——完整手工链路（2026-10-11 全程验证）**：`tauri android build` 在本机
+   卡两处上游问题——①CLI 往 jniLibs symlink 需 Windows 开发者模式；②gradle 的 rustBuild 任务经
+   pnpm 重入 CLI 时 node 链稳定 fastfail（手动同命令正常）。绕行全程无需特权：
+   ```bash
+   # a) Rust 产物，每个 ABI 一次（最后 symlink 报错可忽略，.so 已在 target/<abi>/release/ 生成）
+   pnpm exec dotenv -v KEEP_SOURCEMAPS=1 -e .env.tauri -- tauri android build -t aarch64 \
+     --config <selfhost 覆盖 json> -- --features devtools     # 再跑一遍 -t x86_64
+   # b) 把两个 libreadestlib.so 复制进 gen/android/app/src/main/jniLibs/{arm64-v8a,x86_64}/
+   # c) gradle 打包，排掉 rustBuild 任务：
+   (cd src-tauri/gen/android && gradlew.bat assembleUniversalRelease --console=plain \
+     -x rustBuildArm64Release -x rustBuildArmRelease -x rustBuildX86_64Release -x rustBuildUniversalRelease)
+   # d) 签名：build-tools 的 zipalign -f -p 4 + apksigner sign（调试 keystore，pass android）
+   ```
+   配套一次性环境：**JDK 21**（`scoop install temurin21-jdk`；Android Studio JBR 是 25，Gradle 8.14
+   不认）、`D:\Software\Scoop\shims\pnpm.bat` 垫片（gradle 找 .bat 形态）、gen/android/gradle.properties
+   加本机代理 systemProp（services.gradle.org 直连超时）、`gen/android` 未物化时先
+   `pnpm tauri android init`（会按模板覆盖已提交的定制文件——`git checkout -- <gen 路径>` 恢复，
+   根级新生成的 gradle 工程文件保留）并补 `app/src/main/res/values/ic_launcher_background.xml`
+   （模板漏发，颜色对齐 drawable 的 #3DDC84）。已提交的自动修复：`src-tauri/build.rs`（advapi32 搜索路径）、
+   `scripts/tauri.mjs`（android-studio-script 三元组→短架构名归一）。
 
 ## 重生成补丁
 
