@@ -2514,5 +2514,16 @@
   "Book Info": "书籍信息",
   "QR Code": "二维码",
   "Links to this passage in Readest": "链接到 Readest 中的这段文字",
-  "via {{app}}": "来自 {{app}}"
+  "via {{app}}": "来自 {{app}}",
+  "Sign in with your self-hosted sync server login code.": "使用自托管同步服务器的登录码登录。",
+  "self-hosted": "自托管",
+  "Sync server address": "同步服务器地址",
+  "Login code": "登录码",
+  "Your login code": "您的登录码",
+  "Invalid login code": "登录码无效",
+  "Cannot connect to the sync server. Check that the server is running and the server address is correctly configured in the app.": "无法连接同步服务器。请检查服务端是否在运行，以及应用内的服务器地址是否配置正确。",
+  "Please enter your sync server address above before signing in.": "登录前请先在上方填写同步服务器地址。",
+  "The sync server encountered an internal error. Please check the server logs and try again later.": "同步服务器遇到内部错误。请查看服务端日志后稍后重试。",
+  "Too many failed attempts. This device is locked. Try again in {{minutes}} min.": "失败次数过多，本设备已锁定。请在 {{minutes}} 分钟后重试。",
+  "Too many failed attempts. This device is temporarily locked.": "失败次数过多，本设备已临时锁定。"
 }
