@@ -72,4 +72,10 @@ impl Config {
     pub fn files_root(&self) -> PathBuf {
         self.data_dir.join("files")
     }
+
+    /// Content-addressed blob store backing the per-uid files/ tree via
+    /// hard links (library feature): identical bytes are stored once.
+    pub fn blobs_root(&self) -> PathBuf {
+        self.data_dir.join("blobs")
+    }
 }

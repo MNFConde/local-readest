@@ -11,6 +11,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 use crate::auth::AuthUser;
@@ -155,6 +156,130 @@ fn blob_path(state: &SharedState, key: &str) -> Result<PathBuf, Response> {
     Ok(path)
 }
 
+/// Store `body` content-addressed under `blobs/<sha256>` and hard-link the
+/// caller's `path` to it, so identical book bytes occupy disk once server-wide
+/// while every per-uid key still exists (quota/list walk unchanged: hardlinks
+/// report full size). Fall back to a plain write where hardlinks don't work.
+///
+/// The blobs/ entry is written exactly once, write-if-absent via temp+rename:
+/// `fs::write` on an existing hardlinked path would truncate the shared blob
+/// and corrupt every other user's copy of the same book.
+fn store_dedup(state: &SharedState, path: &Path, body: &[u8]) -> std::io::Result<()> {
+    let digest = Sha256::digest(body);
+    let blobs = state.cfg.blobs_root();
+    std::fs::create_dir_all(&blobs)?;
+    let blob = blobs.join(hex::encode(digest));
+    if !blob.exists() {
+        let tmp = blobs.join(format!(".incoming-{}", std::process::id()));
+        std::fs::write(&tmp, body)?;
+        // Rename may race a concurrent identical upload; either outcome leaves
+        // a complete blob at `blob`, so rename errors are non-fatal here.
+        match std::fs::rename(&tmp, &blob) {
+            Ok(()) => {}
+            Err(_) if blob.exists() => {
+                let _ = std::fs::remove_file(&tmp);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    match std::fs::hard_link(&blob, path) {
+        Ok(()) => Ok(()),
+        // Overwriting an existing key: swap the link to the (new) blob.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(path)?;
+            std::fs::hard_link(&blob, path)
+        }
+        // Cross-device or filesystems without hardlink support.
+        Err(_) => std::fs::write(path, body),
+    }
+}
+
+/// Hard-link count of a file (1 = no other links). Best-effort: unreadable
+/// entries count as linked so GC never deletes what it cannot inspect.
+fn link_count(path: &Path) -> u64 {
+    #[cfg(unix)]
+    {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) => std::os::unix::fs::MetadataExt::nlink(&meta),
+            Err(_) => 2,
+        }
+    }
+    #[cfg(windows)]
+    {
+        // std's number_of_links() is unstable (windows_by_handle); ask
+        // kernel32 directly — BY_HANDLE_FILE_INFORMATION.nNumberOfLinks.
+        #[repr(C)]
+        struct ByHandleInfo {
+            attributes: u32,
+            creation: [u32; 2],
+            access: [u32; 2],
+            write: [u32; 2],
+            volume_serial: u32,
+            size_high: u32,
+            size_low: u32,
+            links: u32,
+            index_high: u32,
+            index_low: u32,
+        }
+        extern "system" {
+            fn GetFileInformationByHandle(
+                handle: *mut std::ffi::c_void,
+                info: *mut ByHandleInfo,
+            ) -> i32;
+        }
+        use std::os::windows::io::AsRawHandle;
+        let Ok(file) = std::fs::File::open(path) else {
+            return 2;
+        };
+        let mut info = ByHandleInfo {
+            attributes: 0,
+            creation: [0; 2],
+            access: [0; 2],
+            write: [0; 2],
+            volume_serial: 0,
+            size_high: 0,
+            size_low: 0,
+            links: 0,
+            index_high: 0,
+            index_low: 0,
+        };
+        let ok = unsafe {
+            GetFileInformationByHandle(file.as_raw_handle(), &mut info)
+        };
+        if ok == 0 {
+            2
+        } else {
+            info.links as u64
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        2
+    }
+}
+
+/// Delete content-addressed blobs whose per-uid hard links are all gone
+/// (link count 1 = only the blobs/ entry remains). Runs at boot; also
+/// exposed to the admin endpoint.
+pub fn gc_blobs(cfg: &crate::config::Config) -> usize {
+    let Ok(entries) = std::fs::read_dir(cfg.blobs_root()) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(true) {
+            continue;
+        }
+        if link_count(&entry.path()) <= 1 {
+            if std::fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
 /// PUT /api/storage/blob/<key> — quota-checked before accepting the body.
 pub async fn blob_put(
     State(state): State<SharedState>,
@@ -192,7 +317,14 @@ pub async fn blob_put(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| ApiError::server(anyhow::anyhow!(e)))?;
     }
-    std::fs::write(&path, &body).map_err(|e| ApiError::server(anyhow::anyhow!(e)))?;
+    store_dedup(&state, &path, &body).map_err(|e| ApiError::server(anyhow::anyhow!(e)))?;
+    #[cfg(feature = "library")]
+    {
+        if let Ok(mut conn) = state.db.lock() {
+            // Catalog registration is best-effort: never fail the upload over it.
+            let _ = crate::library::catalog::register_upload(&mut conn, uid, &key);
+        }
+    }
     Ok(StatusCode::OK.into_response())
 }
 
@@ -327,7 +459,7 @@ pub async fn download_batch(body: Bytes) -> Result<Response, ApiError> {
     Ok(Json(json!({ "downloadUrls": out })).into_response())
 }
 
-fn book_hash_from_key(key: &str) -> Option<String> {
+pub fn book_hash_from_key(key: &str) -> Option<String> {
     let parts: Vec<&str> = key.split('/').collect();
     for i in 0..parts.len() {
         if parts[i] == "Books" && i > 0 && parts[i - 1] == "Readest" && i + 1 < parts.len() {

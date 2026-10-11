@@ -2,6 +2,8 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod error;
+#[cfg(feature = "library")]
+pub mod library;
 pub mod jwt;
 pub mod proxy;
 pub mod ratelimit;

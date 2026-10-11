@@ -819,6 +819,187 @@ async fn storage_blob_accepts_bodies_over_axum_default_limit() {
     assert_eq!(status, StatusCode::OK, "over-2MiB put must pass");
 }
 
+// ── content-addressed dedupe + catalog (library feature) ────────────────────
+
+fn blobs_of(cfg: &Config) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(cfg.blobs_root()) {
+        for e in entries.flatten() {
+            if e.file_type().map(|t| t.is_dir()).unwrap_or(true) {
+                continue;
+            }
+            names.push(e.file_name().to_string_lossy().into_owned());
+        }
+    }
+    names.sort();
+    names
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn storage_dedup_same_bytes_into_one_blob() {
+    let cfg = test_config("storage-dedup");
+    let state = test_state(cfg.clone());
+    let token_a = token_for(&state, "user-da");
+    let token_b = token_for(&state, "user-db");
+    let app = routes::router(state.clone());
+    let body = vec![0x5Au8; 4096];
+
+    let (s1, _, _) = put_blob(
+        app.clone(),
+        &token_a,
+        "user-da/Readest/Books/hashX/book.epub",
+        body.clone(),
+    )
+    .await;
+    let (s2, _, _) = put_blob(
+        app.clone(),
+        &token_b,
+        "user-db/Readest/Books/hashX/book.epub",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(s1, StatusCode::OK);
+    assert_eq!(s2, StatusCode::OK);
+    assert_eq!(blobs_of(&cfg).len(), 1, "identical bytes must share one blob");
+
+    // Both users read their own key back through the hardlink.
+    for (tok, key) in [
+        (&token_a, "user-da/Readest/Books/hashX/book.epub"),
+        (&token_b, "user-db/Readest/Books/hashX/book.epub"),
+    ] {
+        let resp = request(
+            app.clone(),
+            "GET",
+            &format!("/api/storage/blob/{key}"),
+            Some(tok),
+            None,
+        )
+        .await;
+        assert_eq!(resp.0, StatusCode::OK);
+    }
+
+    // Deleting one user's link must not affect the other's copy.
+    let (del, _, _) = request(
+        app.clone(),
+        "DELETE",
+        "/api/storage/delete?fileKey=user-da/Readest/Books/hashX/book.epub",
+        Some(&token_a),
+        None,
+    )
+    .await;
+    assert_eq!(del, StatusCode::OK);
+    let resp = request(
+        app.clone(),
+        "GET",
+        "/api/storage/blob/user-db/Readest/Books/hashX/book.epub",
+        Some(&token_b),
+        None,
+    )
+    .await;
+    assert_eq!(resp.0, StatusCode::OK, "other user's copy must survive");
+
+    // After the last link goes, boot GC sweeps the orphaned blob.
+    request(
+        app.clone(),
+        "DELETE",
+        "/api/storage/delete?fileKey=user-db/Readest/Books/hashX/book.epub",
+        Some(&token_b),
+        None,
+    )
+    .await;
+    let removed = sync_server::storage::gc_blobs(&state.cfg);
+    assert_eq!(removed, 1);
+    assert!(blobs_of(&cfg).is_empty(), "orphaned blob must be gone");
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn catalog_registration_on_book_upload() {
+    let cfg = test_config("catalog-reg");
+    let state = test_state(cfg.clone());
+    let token = token_for(&state, "user-cat");
+    let app = routes::router(state.clone());
+
+    // Seed the uploader's book record (as the client does via /api/sync).
+    {
+        let conn = state.db.lock().unwrap();
+        sync_server::store::upsert_book_raw(
+            &conn,
+            "user-cat",
+            &sync_server::store::BookRow {
+                book_hash: "hashMeta".into(),
+                meta_hash: String::new(),
+                updated_at: None,
+                deleted_at: None,
+                synced_at: String::new(),
+                data: json!({
+                    "title": "流架构",
+                    "author": "James Urquhart",
+                    "language": "zh",
+                }),
+            },
+        )
+        .unwrap();
+    }
+
+    let (s, _, _) = put_blob(
+        app,
+        &token,
+        "user-cat/Readest/Books/hashMeta/流架构.epub",
+        b"fake epub".to_vec(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    let conn = state.db.lock().unwrap();
+    let (title, author, language, added_by): (String, String, String, String) = conn
+        .query_row(
+            "SELECT title, author, language, added_by FROM catalog_books WHERE hash='hashMeta'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(title, "流架构");
+    assert_eq!(author, "James Urquhart");
+    assert_eq!(language, "zh");
+    assert_eq!(added_by, "user-cat");
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn catalog_registration_fills_without_book_record() {
+    let cfg = test_config("catalog-reg-fallback");
+    let state = test_state(cfg);
+    let token = token_for(&state, "user-cat2");
+    let app = routes::router(state.clone());
+
+    let (s, _, _) = put_blob(
+        app,
+        &token,
+        "user-cat2/Readest/Books/hashBare/Unknown%20Title.epub",
+        b"x".to_vec(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // No books record: fall back to the filename (extension stripped), and a
+    // non-book key (cover.png under a random path) must not register anything.
+    let conn = state.db.lock().unwrap();
+    let title: String = conn
+        .query_row(
+            "SELECT title FROM catalog_books WHERE hash='hashBare'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(title, "Unknown Title");
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM catalog_books", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1, "only the Books/<hash>/ key registers");
+}
+
 // ── proxies (T8) — offline paths only; upstream-forwarding paths need network ──
 
 #[tokio::test]

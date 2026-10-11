@@ -61,6 +61,24 @@ const SCHEMA: &str = r#"
         user_id TEXT, salt_id TEXT, alg TEXT, salt TEXT, created_at TEXT,
         PRIMARY KEY (user_id, salt_id)
     );
+    -- library feature: one authoritative bibliography row per distinct book
+    -- content (hash), plus the work-grouping layer above it. Reading state
+    -- stays per-user in books/notes; these tables only describe the books.
+    CREATE TABLE IF NOT EXISTS catalog_books (
+        hash TEXT PRIMARY KEY,
+        title TEXT NOT NULL DEFAULT '',
+        author TEXT NOT NULL DEFAULT '',
+        language TEXT NOT NULL DEFAULT '',
+        work_id TEXT,
+        source_hash TEXT,
+        added_at TEXT NOT NULL,
+        added_by TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS works (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL DEFAULT '',
+        author TEXT NOT NULL DEFAULT ''
+    );
 "#;
 
 /// Open (creating if needed) the metadata database and bootstrap the schema.

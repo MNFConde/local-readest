@@ -8,6 +8,13 @@ license = "AGPL-3.0"
 # Standalone crate: must NOT join the repo-root Tauri Cargo workspace.
 [workspace]
 
+[features]
+default = ["library"]
+# The online-library side (content-addressed dedupe, catalog, OPDS feeds,
+# admin page) builds as one switchable module tree so the sync core can ship
+# without it — and it can later split into its own binary mechanically.
+library = []
+
 [dependencies]
 anyhow = "1"
 argon2 = { version = "0.5", features = ["std"] }

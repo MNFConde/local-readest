@@ -104,6 +104,10 @@ fn account_op(
 
 async fn serve(cfg: Config) -> anyhow::Result<()> {
     std::fs::create_dir_all(cfg.files_root())?;
+    let removed = sync_server::storage::gc_blobs(&cfg);
+    if removed > 0 {
+        tracing::info!("blob gc: removed {removed} orphaned content-addressed blob(s)");
+    }
     let conn = db::open_db(&cfg)?;
     let state: db::SharedState = Arc::new(db::AppState {
         db: conn.into(),
