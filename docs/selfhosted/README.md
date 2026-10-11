@@ -29,7 +29,7 @@ git apply --3way docs/selfhosted/readest-client-selfhost.patch   # 解 6+ 文件
 - `src/hooks/useQuotaStats.ts`、`useAvailablePlans.ts`：配额走自建服务端；跳过 Stripe/IAP
 - `src/libs/storage.ts`、`src/libs/sync.ts`、`src/libs/share.ts`、`src/libs/user.ts`、`src/libs/metadata.ts`、`src/services/translators/providers/deepl.ts`：**API 端点一律调用时求值**（模块级常量会在登录前固化为官方域名）+ blob 相对 URL 经 `toFullUrl` 拼接且带 Bearer 头（web 的 XHR 分支也必须走 `toFullUrl`）；`src/utils/transfer.ts`、三个 sync provider：`tauriUpload` headers 类型修正为 `Record`
 - `src/services/transferManager.ts`：错误信息透传（利于排障自建服务端错误）
-- `src-tauri/src/transfer_file.rs` + `Cargo.toml`（tokio `time`）：分块下载失败重试/严格 206 校验/失败即中止删残片——对家庭宽带自建服务端重要
+- `src-tauri/src/transfer_file.rs`：分块下载失败重试/严格 206 校验/失败即中止删残片——对家庭宽带自建服务端重要（其 tokio `time` 依赖官方已自带，对应 Cargo.toml hunk 已从补丁剔除——重放会把官方的 `fs,net,sync,time` 挤回旧集致编译失败，2026-10-11 抓到）
 - `src/__tests__/utils/selfhostedAuth.test.ts`、`helpers/auth.test.ts`、`helpers/supabase-mock.ts`
 
 **明确排除**（ywz 混入的自有功能，勿在重放时顺手带回）：
