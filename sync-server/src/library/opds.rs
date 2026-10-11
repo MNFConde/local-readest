@@ -30,6 +30,8 @@ pub fn router(state: SharedState) -> Router<SharedState> {
     Router::new()
         .route("/", get(root_feed))
         .route("/books", get(books_feed))
+        .route("/works", get(works_feed))
+        .route("/work/{id}", get(work_feed))
         .route("/search", get(search_feed))
         .route("/opensearch.xml", get(opensearch))
         .route("/download/{hash}", get(download))
@@ -78,6 +80,20 @@ struct CatalogRow {
     author: String,
     language: String,
     added_at: String,
+    work_id: Option<String>,
+    work_title: Option<String>,
+}
+
+fn catalog_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogRow> {
+    Ok(CatalogRow {
+        hash: r.get(0)?,
+        title: r.get(1)?,
+        author: r.get(2)?,
+        language: r.get(3)?,
+        added_at: r.get(4)?,
+        work_id: r.get(5)?,
+        work_title: r.get(6)?,
+    })
 }
 
 fn query_catalog(
@@ -94,42 +110,79 @@ fn query_catalog(
     let scope = if state.cfg.library_shared {
         "1=1".to_string()
     } else {
-        format!("added_by = '{}'", uid.replace('\'', "''"))
+        format!("cb.added_by = '{}'", uid.replace('\'', "''"))
     };
     let like = format!("%{}%", search.replace('\'', "''"));
     let total: i64 = conn
         .query_row(
             &format!(
-                "SELECT COUNT(*) FROM catalog_books WHERE {scope}
-                 AND (?1 = '' OR title LIKE ?2 OR author LIKE ?2)"
+                "SELECT COUNT(*) FROM catalog_books cb WHERE {scope}
+                 AND (?1 = '' OR cb.title LIKE ?2 OR cb.author LIKE ?2)"
             ),
             params![search, like],
             |r| r.get(0),
         )
         .unwrap_or(0);
     let Ok(mut stmt) = conn.prepare(&format!(
-        "SELECT hash, title, author, language, added_at FROM catalog_books
-         WHERE {scope} AND (?1 = '' OR title LIKE ?2 OR author LIKE ?2)
-         ORDER BY added_at DESC, hash LIMIT ?3 OFFSET ?4"
+        "SELECT cb.hash, cb.title, cb.author, cb.language, cb.added_at, cb.work_id, w.title
+         FROM catalog_books cb LEFT JOIN works w ON w.id = cb.work_id
+         WHERE {scope} AND (?1 = '' OR cb.title LIKE ?2 OR cb.author LIKE ?2)
+         ORDER BY cb.added_at DESC, cb.hash LIMIT ?3 OFFSET ?4"
     )) else {
         return (Vec::new(), total);
     };
     let rows = stmt
         .query_map(
             params![search, like, PAGE_SIZE, (page - 1) * PAGE_SIZE],
-            |r| {
-                Ok(CatalogRow {
-                    hash: r.get(0)?,
-                    title: r.get(1)?,
-                    author: r.get(2)?,
-                    language: r.get(3)?,
-                    added_at: r.get(4)?,
-                })
-            },
+            catalog_row,
         )
         .map(|rows| rows.flatten().collect::<Vec<_>>())
         .unwrap_or_default();
     (rows, total)
+}
+
+/// (work id, work title, number of editions) — only works with visible books.
+fn query_works(state: &SharedState, uid: &str) -> Vec<(String, String, i64)> {
+    let Ok(conn) = state.db.lock() else {
+        return Vec::new();
+    };
+    let scope = if state.cfg.library_shared {
+        "1=1".to_string()
+    } else {
+        format!("cb.added_by = '{}'", uid.replace('\'', "''"))
+    };
+    let Ok(mut stmt) = conn.prepare(&format!(
+        "SELECT w.id, w.title, COUNT(cb.hash) FROM works w
+         JOIN catalog_books cb ON cb.work_id = w.id
+         WHERE {scope} GROUP BY w.id, w.title ORDER BY w.title"
+    )) else {
+        return Vec::new();
+    };
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+}
+
+fn query_work_books(state: &SharedState, uid: &str, work_id: &str) -> Vec<CatalogRow> {
+    let Ok(conn) = state.db.lock() else {
+        return Vec::new();
+    };
+    let scope = if state.cfg.library_shared {
+        "1=1".to_string()
+    } else {
+        format!("cb.added_by = '{}'", uid.replace('\'', "''"))
+    };
+    let Ok(mut stmt) = conn.prepare(&format!(
+        "SELECT cb.hash, cb.title, cb.author, cb.language, cb.added_at, cb.work_id, w.title
+         FROM catalog_books cb LEFT JOIN works w ON w.id = cb.work_id
+         WHERE cb.work_id = ?1 AND {scope}
+         ORDER BY cb.added_at DESC, cb.hash"
+    )) else {
+        return Vec::new();
+    };
+    stmt.query_map(params![work_id], catalog_row)
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
 }
 
 // ── file discovery ──────────────────────────────────────────────────────────
@@ -328,6 +381,15 @@ fn entry_xml(row: &CatalogRow, holders: &[Holder]) -> String {
             mime_for(&h.name),
         )
     });
+    // Sibling editions of the same work are one collection hop away.
+    let collection = match (&row.work_id, &row.work_title) {
+        (Some(id), Some(title)) => format!(
+            "<link rel=\"collection\" href=\"/opds/work/{}\" title=\"{}\" type=\"{ACQ_TYPE}\"/>\n",
+            xml_escape(id),
+            xml_escape(title),
+        ),
+        _ => String::new(),
+    };
     format!(
         "<entry>\n\
          \x20 <id>urn:readest:book:{}</id>\n\
@@ -335,6 +397,7 @@ fn entry_xml(row: &CatalogRow, holders: &[Holder]) -> String {
          \x20 {}{}\
          \x20 <updated>{}</updated>\n\
          \x20 {}\
+         \x20 {collection}\
          \x20 <link rel=\"http://opds-spec.org/image\" href=\"/opds/cover/{}\" type=\"image/png\"/>\n\
          \x20 <link rel=\"http://opds-spec.org/image/thumbnail\" href=\"/opds/cover/{}\" type=\"image/png\"/>\n\
          </entry>\n",
@@ -364,8 +427,16 @@ async fn root_feed(
          \x20 <updated>{}</updated>\n\
          \x20 <content type=\"text\">{total} book(s)</content>\n\
          \x20 <link rel=\"subsection\" href=\"/opds/books\" type=\"{ACQ_TYPE}\"/>\n\
+         </entry>\n\
+         <entry>\n\
+         \x20 <id>urn:readest:library:works</id>\n\
+         \x20 <title>By Work</title>\n\
+         \x20 <updated>{}</updated>\n\
+         \x20 <content type=\"text\">editions grouped by work</content>\n\
+         \x20 <link rel=\"subsection\" href=\"/opds/works\" type=\"{NAV_TYPE}\"/>\n\
          </entry>\n</feed>\n",
         feed_open("urn:readest:library", "Readest Library", "/opds", NAV_TYPE),
+        crate::rfc3339::now_rfc3339(),
         crate::rfc3339::now_rfc3339(),
     );
     Ok((
@@ -390,6 +461,57 @@ async fn search_feed(
 ) -> Result<Response, Response> {
     let query = q.get("q").cloned().unwrap_or_default();
     books_feed_impl(state, headers, q, &query).await
+}
+
+async fn works_feed(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    let user = basic_user(&state, &headers)?;
+    let works = query_works(&state, &user.id);
+    let mut xml = feed_open("urn:readest:library:works", "By Work", "/opds/works", NAV_TYPE);
+    let now = crate::rfc3339::now_rfc3339();
+    for (id, title, count) in &works {
+        xml.push_str(&format!(
+            "<entry>\n\
+             \x20 <id>urn:readest:work:{}</id>\n\
+             \x20 <title>{}</title>\n\
+             \x20 <updated>{now}</updated>\n\
+             \x20 <content type=\"text\">{count} edition(s)</content>\n\
+             \x20 <link rel=\"subsection\" href=\"/opds/work/{}\" type=\"{ACQ_TYPE}\"/>\n\
+             </entry>\n",
+            xml_escape(id),
+            xml_escape(title),
+            xml_escape(id),
+        ));
+    }
+    xml.push_str("</feed>\n");
+    Ok(([(header::CONTENT_TYPE, NAV_TYPE)], xml).into_response())
+}
+
+async fn work_feed(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(work_id): Path<String>,
+) -> Result<Response, Response> {
+    let user = basic_user(&state, &headers)?;
+    let rows = query_work_books(&state, &user.id, &work_id);
+    let title = rows
+        .first()
+        .and_then(|r| r.work_title.clone())
+        .unwrap_or_else(|| work_id.clone());
+    let mut xml = feed_open(
+        &format!("urn:readest:work:{work_id}"),
+        &title,
+        &format!("/opds/work/{work_id}"),
+        ACQ_TYPE,
+    );
+    for row in &rows {
+        let holders = find_holders(&state.cfg, &row.hash);
+        xml.push_str(&entry_xml(row, &holders));
+    }
+    xml.push_str("</feed>\n");
+    Ok(([(header::CONTENT_TYPE, ACQ_TYPE)], xml).into_response())
 }
 
 async fn books_feed_impl(

@@ -87,6 +87,8 @@ pub fn router(state: SharedState) -> Router {
         // The online library rides on the same server/process but as its own
         // route subtree; disabling the feature removes it wholesale.
         app = app.nest("/opds", crate::library::opds::router(state.clone()));
+        app = app.nest("/api/admin", crate::library::admin::router(state.clone()));
+        app = app.route("/admin", get(crate::library::admin::admin_page));
     }
     app.layer(middleware::from_fn(cors))
         .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes))

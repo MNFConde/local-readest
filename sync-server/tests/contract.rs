@@ -24,6 +24,7 @@ pub fn test_config(tag: &str) -> Config {
         quota_bytes: 1024 * 1024,
         max_body_bytes: 512 * 1024 * 1024,
         library_shared: true,
+        admin_token: None,
         deepl_api_key: None,
         deepl_endpoint: None,
     }
@@ -793,6 +794,7 @@ async fn storage_quota_enforced_on_blob_put() {
         quota_bytes: 8,
         max_body_bytes: 512 * 1024 * 1024,
         library_shared: true,
+        admin_token: None,
         deepl_api_key: None,
         deepl_endpoint: None,
     };
@@ -824,6 +826,7 @@ async fn storage_blob_accepts_bodies_over_axum_default_limit() {
         quota_bytes: 64 * 1024 * 1024,
         max_body_bytes: 512 * 1024 * 1024,
         library_shared: true,
+        admin_token: None,
         deepl_api_key: None,
         deepl_endpoint: None,
     };
@@ -1048,10 +1051,11 @@ async fn upload_catalog_book(state: &SharedState, uid: &str, hash: &str, title: 
         .unwrap();
     }
     let token = token_for(state, uid);
+    let path_title = title.replace(' ', "%20");
     let (s, _, _) = put_blob(
         routes::router(state.clone()),
         &token,
-        &format!("{uid}/Readest/Books/{hash}/{title}.epub"),
+        &format!("{uid}/Readest/Books/{hash}/{path_title}.epub"),
         b"fake epub bytes".to_vec(),
     )
     .await;
@@ -1208,6 +1212,219 @@ async fn opds_shared_visibility_search_and_flag() {
     let xml = String::from_utf8(xml).unwrap();
     assert!(xml.contains("OnlyMine"));
     assert!(!xml.contains("NotYours"), "private library hides other users");
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn opds_feed_groups_books_by_work() {
+    let mut cfg = test_config("opds-works");
+    cfg.admin_token = Some("admin-secret-token".into());
+    let state = test_state(cfg);
+    let uid = seed_user(&state, "works@t.test", "code-works");
+    upload_catalog_book(&state, &uid, "hashW1", "Edition One").await;
+    upload_catalog_book(&state, &uid, "hashW2", "Edition Two").await;
+
+    // Group both editions under one work via the admin API.
+    let app = routes::router(state.clone());
+    let tok = Some("admin-secret-token");
+    let (status, body, _) = admin_request(
+        app.clone(),
+        "POST",
+        "/api/admin/works",
+        tok,
+        Some(json!({ "title": "Grouped Work", "author": "X" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let work_id = body["id"].as_str().unwrap().to_string();
+    for h in ["hashW1", "hashW2"] {
+        let (status, _, _) = admin_request(
+            app.clone(),
+            "POST",
+            &format!("/api/admin/books/{h}"),
+            tok,
+            Some(json!({ "workId": work_id })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    let auth = basic_header("works@t.test", "code-works");
+
+    // Root feed links the works section; the works feed lists the group.
+    let (status, xml, _) = opds_get(app.clone(), "/opds", &auth).await;
+    assert_eq!(status, StatusCode::OK);
+    let xml = String::from_utf8(xml).unwrap();
+    assert!(xml.contains("/opds/works"));
+
+    let (status, xml, _) = opds_get(app.clone(), "/opds/works", &auth).await;
+    assert_eq!(status, StatusCode::OK);
+    let xml = String::from_utf8(xml).unwrap();
+    assert!(xml.contains("Grouped Work"));
+    assert!(xml.contains(&format!("/opds/work/{work_id}")));
+
+    // The work feed lists every edition with its acquisition link; the
+    // plain books feed exposes the group via rel="collection" links.
+    let (status, xml, _) =
+        opds_get(app.clone(), &format!("/opds/work/{work_id}"), &auth).await;
+    assert_eq!(status, StatusCode::OK);
+    let xml = String::from_utf8(xml).unwrap();
+    assert!(xml.contains("Edition One") && xml.contains("Edition Two"));
+    assert!(xml.contains("/opds/download/hashW1"));
+    assert!(xml.contains("/opds/download/hashW2"));
+
+    let (status, xml, _) = opds_get(app, "/opds/books", &auth).await;
+    assert_eq!(status, StatusCode::OK);
+    let xml = String::from_utf8(xml).unwrap();
+    assert!(xml.contains(&format!(
+        "rel=\"collection\" href=\"/opds/work/{work_id}\" title=\"Grouped Work\""
+    )));
+}
+
+// ── admin API + page (library feature) ──────────────────────────────────────
+
+async fn admin_request(
+    app: axum::Router,
+    method: &str,
+    uri: &str,
+    admin_token: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, Value, axum::http::HeaderMap) {
+    let bearer = admin_token.map(|t| format!("Bearer {t}"));
+    let extra: Vec<(String, String)> = bearer.map(|b| vec![("Authorization".to_string(), b)]).unwrap_or_default();
+    let extra_refs: Vec<(&str, &str)> = extra.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    request_with_headers(app, method, uri, None, body, &extra_refs).await
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn admin_disabled_without_token_and_auth_enforced() {
+    // No ADMIN_TOKEN: admin API 404s entirely, page still renders.
+    let state = test_state(test_config("admin-off"));
+    let app = routes::router(state.clone());
+    let (status, _, _) = admin_request(app.clone(), "GET", "/api/admin/books", None, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, body, headers) =
+        request_raw(app, "GET", "/admin", None, None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .contains("text/html"));
+    assert!(body.len() > 100);
+
+    // With a token: wrong/missing bearer → 401, right bearer → 200.
+    let mut cfg = test_config("admin-on");
+    cfg.admin_token = Some("admin-secret-token".into());
+    let state = test_state(cfg);
+    let app = routes::router(state);
+    let (status, _, _) = admin_request(app.clone(), "GET", "/api/admin/books", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) =
+        admin_request(app.clone(), "GET", "/api/admin/books", Some("wrong"), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, body, _) =
+        admin_request(app, "GET", "/api/admin/books", Some("admin-secret-token"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["books"], json!([]));
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn admin_book_update_work_grouping_and_source_hash() {
+    let mut cfg = test_config("admin-update");
+    cfg.admin_token = Some("admin-secret-token".into());
+    let state = test_state(cfg.clone());
+    let uid = seed_user(&state, "admin@t.test", "admin-code-1");
+    upload_catalog_book(&state, &uid, "hashE1", "Book E1").await;
+    upload_catalog_book(&state, &uid, "hashE2", "Book E2").await;
+
+    let app = routes::router(state.clone());
+    let tok = Some("admin-secret-token");
+
+    // Create a manual work, group both books under it, tag lineage.
+    let (status, body, _) =
+        admin_request(app.clone(), "POST", "/api/admin/works", tok, Some(json!({ "title": "Same Work", "author": "X" }))).await;
+    assert_eq!(status, StatusCode::OK);
+    let work_id = body["id"].as_str().unwrap().to_string();
+
+    for h in ["hashE1", "hashE2"] {
+        let (status, _, _) = admin_request(
+            app.clone(),
+            "POST",
+            &format!("/api/admin/books/{h}"),
+            tok,
+            Some(json!({ "workId": work_id, "sourceHash": "hashOriginal" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    let (status, body, _) = admin_request(app.clone(), "GET", "/api/admin/works", tok, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["works"][0]["books"], 2, "both books grouped");
+
+    // Metadata edit lands.
+    let (status, body, _) = admin_request(
+        app.clone(),
+        "POST",
+        "/api/admin/books/hashE1",
+        tok,
+        Some(json!({ "title": "Renamed", "language": "en" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body, _) = admin_request(app, "GET", "/api/admin/books", tok, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let e1 = body["books"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["hash"] == "hashE1")
+        .unwrap();
+    assert_eq!(e1["title"], "Renamed");
+    assert_eq!(e1["language"], "en");
+    assert_eq!(e1["sourceHash"], "hashOriginal");
+    assert_eq!(e1["workId"], work_id);
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn admin_user_state_and_enrich_offline_shape() {
+    let mut cfg = test_config("admin-users");
+    cfg.admin_token = Some("admin-secret-token".into());
+    let state = test_state(cfg);
+    seed_user(&state, "u1@t.test", "code-u1");
+    seed_user(&state, "u2@t.test", "code-u2");
+
+    let app = routes::router(state.clone());
+    let tok = Some("admin-secret-token");
+    let (status, body, _) = admin_request(app.clone(), "GET", "/api/admin/users", tok, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["users"].as_array().unwrap().len(), 2);
+
+    let (status, body, _) = admin_request(
+        app.clone(),
+        "POST",
+        "/api/admin/users/u1%40t.test/state",
+        tok,
+        Some(json!({ "disabled": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let conn = state.db.lock().unwrap();
+    let disabled: i64 = conn
+        .query_row("SELECT disabled FROM users WHERE email='u1@t.test'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(disabled, 1);
+
+    // Offline enrich: unreachable network is tolerated and reported per book.
+    drop(conn);
+    let (status, body, _) = admin_request(app, "POST", "/api/admin/enrich", tok, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["enriched"].is_i64());
+    assert!(body["failed"].is_array());
 }
 
 // ── proxies (T8) — offline paths only; upstream-forwarding paths need network ──

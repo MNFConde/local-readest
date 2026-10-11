@@ -10,6 +10,9 @@ pub struct Config {
     /// Online library (OPDS) visibility: false = each user only sees their
     /// own uploads in the catalog, true = every user sees every book.
     pub library_shared: bool,
+    /// Admin API/page bearer token. None disables /api/admin entirely
+    /// (safe default) while /admin still renders an explanatory page.
+    pub admin_token: Option<String>,
     pub deepl_api_key: Option<String>,
     pub deepl_endpoint: Option<String>,
 }
@@ -49,6 +52,7 @@ impl Config {
             quota_bytes,
             max_body_bytes,
             library_shared,
+            admin_token: get("ADMIN_TOKEN").filter(|t| t.len() >= 8),
             deepl_api_key: get("DEEPL_API_KEY"),
             deepl_endpoint: get("DEEPL_ENDPOINT"),
         }

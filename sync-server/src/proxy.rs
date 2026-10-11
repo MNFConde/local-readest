@@ -128,7 +128,7 @@ pub async fn yandex_translate(
     Ok((status, bytes).into_response())
 }
 
-fn urlencoded(s: &str) -> String {
+pub(crate) fn urlencoded(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
@@ -215,25 +215,67 @@ pub async fn metadata_search(
     let out: Vec<Value> = body
         .get("docs")
         .and_then(Value::as_array)
-        .map(|docs| {
-            docs.iter()
-                .map(|d| {
-                    let cover_i = d.get("cover_i").and_then(Value::as_i64).unwrap_or(0);
-                    let cover = if cover_i != 0 {
-                        format!("https://covers.openlibrary.org/b/id/{cover_i}-L.jpg")
-                    } else {
-                        String::new()
-                    };
-                    json!({
-                        "title": d.get("title").cloned().unwrap_or(Value::Null),
-                        "authors": d.get("author_name").cloned().unwrap_or(Value::Null),
-                        "cover": cover,
-                        "publish_year": d.get("first_publish_year").cloned().unwrap_or(Value::Null),
-                        "identifiers": { "isbn": d.get("isbn").cloned().unwrap_or(json!([])) },
-                    })
-                })
-                .collect()
-        })
+        .map(|docs| docs.iter().map(map_ol_doc).collect())
         .unwrap_or_default();
     Ok(Json(json!({ "results": out })).into_response())
+}
+
+/// Map one Open Library search doc to the client's expected shape, plus the
+/// work/edition/language fields the reference dropped — the works layer's
+/// auto-grouping keys off `work_key`.
+pub fn map_ol_doc(d: &Value) -> Value {
+    let cover_i = d.get("cover_i").and_then(Value::as_i64).unwrap_or(0);
+    let cover = if cover_i != 0 {
+        format!("https://covers.openlibrary.org/b/id/{cover_i}-L.jpg")
+    } else {
+        String::new()
+    };
+    let language = d
+        .get("language")
+        .and_then(Value::as_array)
+        .and_then(|l| l.first())
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    json!({
+        "title": d.get("title").cloned().unwrap_or(Value::Null),
+        "authors": d.get("author_name").cloned().unwrap_or(Value::Null),
+        "cover": cover,
+        "publish_year": d.get("first_publish_year").cloned().unwrap_or(Value::Null),
+        "identifiers": { "isbn": d.get("isbn").cloned().unwrap_or(json!([])) },
+        "work_key": d.get("key").cloned().unwrap_or(Value::Null),
+        "edition_keys": d.get("edition_key").cloned().unwrap_or(json!([])),
+        "language": language,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ol_doc_mapping_carries_work_and_language() {
+        let doc = json!({
+            "title": "Flow Architectures",
+            "author_name": ["James Urquhart"],
+            "cover_i": 123,
+            "first_publish_year": 2019,
+            "isbn": ["9781492056253"],
+            "key": "/works/OL19540932W",
+            "edition_key": ["OL27313918M"],
+            "language": ["eng"],
+        });
+        let mapped = map_ol_doc(&doc);
+        assert_eq!(mapped["work_key"], "/works/OL19540932W");
+        assert_eq!(mapped["language"], "eng");
+        assert_eq!(mapped["edition_keys"], json!(["OL27313918M"]));
+        assert_eq!(
+            mapped["cover"],
+            "https://covers.openlibrary.org/b/id/123-L.jpg"
+        );
+        // Docs without a work key map to null, not a missing field.
+        let bare = map_ol_doc(&json!({ "title": "x" }));
+        assert_eq!(bare["work_key"], Value::Null);
+        assert_eq!(bare["language"], "");
+    }
 }
