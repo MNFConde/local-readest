@@ -59,7 +59,8 @@ git apply --3way docs/selfhosted/readest-client-selfhost.patch   # 解 6+ 文件
    卡两处上游问题——①CLI 往 jniLibs symlink 需 Windows 开发者模式；②gradle 的 rustBuild 任务经
    pnpm 重入 CLI 时 node 链稳定 fastfail（手动同命令正常）。绕行全程无需特权：
    ```bash
-   # a) Rust 产物，每个 ABI 一次（最后 symlink 报错可忽略，.so 已在 target/<abi>/release/ 生成）
+   # a) Rust 产物，每个 ABI 一次（最后 symlink 报错可忽略，libreadestlib.so 已生成在
+   #    **仓库根** target/<abi>/release/——不是 src-tauri/target；CLI 还可能清空 jniLibs，b 步两个 ABI 都要重拷）
    pnpm exec dotenv -v KEEP_SOURCEMAPS=1 -e .env.tauri -- tauri android build -t aarch64 \
      --config <selfhost 覆盖 json> -- --features devtools     # 再跑一遍 -t x86_64
    # b) 把两个 libreadestlib.so 复制进 gen/android/app/src/main/jniLibs/{arm64-v8a,x86_64}/
