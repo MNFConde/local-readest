@@ -105,6 +105,27 @@ pub fn verify_login(conn: &Connection, code: &str) -> anyhow::Result<Option<User
     }))
 }
 
+/// Email+code pair verification for the OPDS catalog's HTTP Basic auth
+/// (the client's catalog credential fields map to email + login code).
+/// Same semantics as verify_login; argon2's cost is the brute-force guard.
+pub fn verify_login_email(
+    conn: &Connection,
+    email: &str,
+    code: &str,
+) -> anyhow::Result<Option<User>> {
+    let row: Option<(String, String, String, String)> = conn
+        .query_row(
+            "SELECT id, email, code_argon2, plan FROM users
+             WHERE email = ?1 AND code_sha256 = ?2 AND disabled = 0",
+            params![email, code_sha256(code)],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    Ok(row.and_then(|(id, email, argon, plan)| {
+        argon2_verify(&argon, code).then_some(User { id, email, plan })
+    }))
+}
+
 pub fn list_users(conn: &Connection) -> anyhow::Result<Vec<(String, String, bool, String)>> {
     let mut stmt =
         conn.prepare("SELECT email, id, disabled, created_at FROM users ORDER BY created_at")?;

@@ -19,6 +19,7 @@ library = []
 anyhow = "1"
 argon2 = { version = "0.5", features = ["std"] }
 axum = { version = "0.8", features = ["http1", "json", "query", "tokio", "macros"], default-features = true }
+base64 = "0.22"
 dotenvy = "0.15"
 hex = "0.4"
 jsonwebtoken = "9"

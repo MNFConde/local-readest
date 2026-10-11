@@ -45,7 +45,7 @@ async fn cors(req: Request, next: Next) -> Response {
 
 pub fn router(state: SharedState) -> Router {
     let max_body_bytes = state.cfg.max_body_bytes;
-    Router::new()
+    let mut app = Router::new()
         .route("/api/health", get(health))
         .route("/api/auth", post(crate::auth::login))
         .route(
@@ -81,8 +81,14 @@ pub fn router(state: SharedState) -> Router {
             post(crate::proxy::yandex_translate),
         )
         .route("/api/tts/edge", any(crate::proxy::edge_tts))
-        .route("/api/metadata/search", get(crate::proxy::metadata_search))
-        .layer(middleware::from_fn(cors))
+        .route("/api/metadata/search", get(crate::proxy::metadata_search));
+    #[cfg(feature = "library")]
+    {
+        // The online library rides on the same server/process but as its own
+        // route subtree; disabling the feature removes it wholesale.
+        app = app.nest("/opds", crate::library::opds::router(state.clone()));
+    }
+    app.layer(middleware::from_fn(cors))
         .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes))
         .with_state(state)
 }

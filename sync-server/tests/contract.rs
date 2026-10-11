@@ -23,6 +23,7 @@ pub fn test_config(tag: &str) -> Config {
         data_dir,
         quota_bytes: 1024 * 1024,
         max_body_bytes: 512 * 1024 * 1024,
+        library_shared: true,
         deepl_api_key: None,
         deepl_endpoint: None,
     }
@@ -55,6 +56,25 @@ pub async fn request_with_headers(
     body: Option<Value>,
     extra_headers: &[(&str, &str)],
 ) -> (StatusCode, Value, axum::http::HeaderMap) {
+    let (status, bytes, headers) =
+        request_raw(app, method, uri, token, body, extra_headers).await;
+    let json = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
+    (status, json, headers)
+}
+
+/// Raw variant for non-JSON responses (OPDS XML, book downloads).
+pub async fn request_raw(
+    app: axum::Router,
+    method: &str,
+    uri: &str,
+    token: Option<&str>,
+    body: Option<Value>,
+    extra_headers: &[(&str, &str)],
+) -> (StatusCode, Vec<u8>, axum::http::HeaderMap) {
     let mut builder = Request::builder().method(method).uri(uri);
     if let Some(t) = token {
         builder = builder.header("Authorization", format!("Bearer {t}"));
@@ -68,15 +88,10 @@ pub async fn request_with_headers(
     let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
     let headers = resp.headers().clone();
-    let bytes = axum::body::to_bytes(resp.into_body(), 10 * 1024 * 1024)
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024 * 1024)
         .await
         .unwrap();
-    let json = if bytes.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
-    };
-    (status, json, headers)
+    (status, bytes.to_vec(), headers)
 }
 
 #[tokio::test]
@@ -777,6 +792,7 @@ async fn storage_quota_enforced_on_blob_put() {
         data_dir: state.cfg.data_dir.clone(),
         quota_bytes: 8,
         max_body_bytes: 512 * 1024 * 1024,
+        library_shared: true,
         deepl_api_key: None,
         deepl_endpoint: None,
     };
@@ -807,6 +823,7 @@ async fn storage_blob_accepts_bodies_over_axum_default_limit() {
         )),
         quota_bytes: 64 * 1024 * 1024,
         max_body_bytes: 512 * 1024 * 1024,
+        library_shared: true,
         deepl_api_key: None,
         deepl_endpoint: None,
     };
@@ -998,6 +1015,199 @@ async fn catalog_registration_fills_without_book_record() {
         .query_row("SELECT COUNT(*) FROM catalog_books", [], |r| r.get(0))
         .unwrap();
     assert_eq!(count, 1, "only the Books/<hash>/ key registers");
+}
+
+// ── OPDS catalog (library feature) ──────────────────────────────────────────
+
+fn basic_header(email: &str, code: &str) -> (String, String) {
+    use base64::Engine;
+    (
+        "Authorization".into(),
+        format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(format!("{email}:{code}"))
+        ),
+    )
+}
+
+async fn upload_catalog_book(state: &SharedState, uid: &str, hash: &str, title: &str) {
+    {
+        let conn = state.db.lock().unwrap();
+        sync_server::store::upsert_book_raw(
+            &conn,
+            uid,
+            &sync_server::store::BookRow {
+                book_hash: hash.into(),
+                meta_hash: String::new(),
+                updated_at: None,
+                deleted_at: None,
+                synced_at: String::new(),
+                data: json!({ "title": title, "author": "Someone", "language": "zh" }),
+            },
+        )
+        .unwrap();
+    }
+    let token = token_for(state, uid);
+    let (s, _, _) = put_blob(
+        routes::router(state.clone()),
+        &token,
+        &format!("{uid}/Readest/Books/{hash}/{title}.epub"),
+        b"fake epub bytes".to_vec(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[cfg(feature = "library")]
+async fn opds_get(
+    app: axum::Router,
+    uri: &str,
+    auth: &(String, String),
+) -> (StatusCode, Vec<u8>, axum::http::HeaderMap) {
+    request_raw(
+        app,
+        "GET",
+        uri,
+        None,
+        None,
+        &[(auth.0.as_str(), auth.1.as_str())],
+    )
+    .await
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn opds_requires_basic_auth() {
+    let state = test_state(test_config("opds-auth"));
+    let app = routes::router(state);
+    let (status, _, headers) = request_raw(app, "GET", "/opds", None, None, &[]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(headers
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .starts_with("Basic "));
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn opds_feed_download_cover_roundtrip() {
+    let cfg = test_config("opds-roundtrip");
+    let state = test_state(cfg.clone());
+    let uid = seed_user(&state, "opds@t.test", "opds-code-1");
+    let token = token_for(&state, &uid);
+
+    upload_catalog_book(&state, &uid, "hashFeed", "FeedBook").await;
+
+    let app = routes::router(state);
+    let auth = basic_header("opds@t.test", "opds-code-1");
+
+    // Root navigation feed.
+    let (status, xml, headers) = opds_get(app.clone(), "/opds", &auth).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .contains("opds-catalog"));
+    let xml = String::from_utf8(xml).unwrap();
+    assert!(xml.contains("<feed xmlns=") && xml.contains("/opds/books"));
+
+    // Acquisition feed carries the registered title + acquisition link.
+    let (status, xml, _) = opds_get(app.clone(), "/opds/books", &auth).await;
+    assert_eq!(status, StatusCode::OK);
+    let xml = String::from_utf8(xml).unwrap();
+    assert!(xml.contains("FeedBook"), "feed must carry the book title");
+    assert!(xml.contains("/opds/download/hashFeed"));
+    assert!(xml.contains("application/epub+zip"));
+
+    // Wrong code is still 401.
+    let bad = basic_header("opds@t.test", "wrong-code");
+    let (status, _, _) = opds_get(app.clone(), "/opds/books", &bad).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Download round-trip with the exact uploaded bytes.
+    let (status, bytes, headers) =
+        opds_get(app.clone(), "/opds/download/hashFeed", &auth).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, b"fake epub bytes");
+    assert_eq!(
+        headers.get("content-type").and_then(|v| v.to_str().ok()),
+        Some("application/epub+zip")
+    );
+    assert!(headers
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .contains("filename*=UTF-8''FeedBook.epub"));
+
+    // No cover uploaded yet → 404; upload one and it serves.
+    let (status, _, _) = opds_get(app.clone(), "/opds/cover/hashFeed", &auth).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (s, _, _) = put_blob(
+        app.clone(),
+        &token,
+        &format!("{uid}/Readest/Books/hashFeed/cover.png"),
+        b"\x89PNG fake".to_vec(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (status, bytes, headers) =
+        opds_get(app, "/opds/cover/hashFeed", &auth).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, b"\x89PNG fake");
+    assert_eq!(
+        headers.get("content-type").and_then(|v| v.to_str().ok()),
+        Some("image/png")
+    );
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn opds_shared_visibility_search_and_flag() {
+    let cfg = test_config("opds-shared");
+    let state = test_state(cfg.clone());
+    let uid_a = seed_user(&state, "a@t.test", "code-a");
+    let uid_b = seed_user(&state, "b@t.test", "code-b");
+
+    upload_catalog_book(&state, &uid_a, "hashA", "BookOfA").await;
+    upload_catalog_book(&state, &uid_b, "hashB", "BookOfB").await;
+
+    let auth_a = basic_header("a@t.test", "code-a");
+    let app = routes::router(state);
+
+    // Shared by default: A sees both books.
+    let (status, xml, _) =
+        opds_get(app.clone(), "/opds/books", &auth_a).await;
+    assert_eq!(status, StatusCode::OK);
+    let xml = String::from_utf8(xml).unwrap();
+    assert!(xml.contains("BookOfA") && xml.contains("BookOfB"));
+
+    // Search filters by title.
+    let (status, xml, _) =
+        opds_get(app.clone(), "/opds/search?q=BookOfB", &auth_a).await;
+    assert_eq!(status, StatusCode::OK);
+    let xml = String::from_utf8(xml).unwrap();
+    assert!(xml.contains("BookOfB") && !xml.contains("BookOfA"));
+
+    // LIBRARY_SHARED=0: the same request now only returns A's own upload.
+    let mut cfg_private = cfg.clone();
+    cfg_private.library_shared = false;
+    let state_private = test_state(cfg_private);
+    let uid_a2 = seed_user(&state_private, "a2@t.test", "code-a2");
+    upload_catalog_book(&state_private, &uid_a2, "hashA2", "OnlyMine").await;
+    // seed a second user + book that must NOT appear for a2
+    let uid_b2 = seed_user(&state_private, "b2@t.test", "code-b2");
+    upload_catalog_book(&state_private, &uid_b2, "hashB2", "NotYours").await;
+
+    let auth_a2 = basic_header("a2@t.test", "code-a2");
+    let app_private = routes::router(state_private);
+    let (status, xml, _) =
+        opds_get(app_private, "/opds/books", &auth_a2).await;
+    assert_eq!(status, StatusCode::OK);
+    let xml = String::from_utf8(xml).unwrap();
+    assert!(xml.contains("OnlyMine"));
+    assert!(!xml.contains("NotYours"), "private library hides other users");
 }
 
 // ── proxies (T8) — offline paths only; upstream-forwarding paths need network ──

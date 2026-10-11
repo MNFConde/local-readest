@@ -5,3 +5,4 @@
 //! read-only except the catalog tables it owns.
 
 pub mod catalog;
+pub mod opds;

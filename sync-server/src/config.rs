@@ -7,6 +7,9 @@ pub struct Config {
     pub data_dir: PathBuf,
     pub quota_bytes: i64,
     pub max_body_bytes: usize,
+    /// Online library (OPDS) visibility: false = each user only sees their
+    /// own uploads in the catalog, true = every user sees every book.
+    pub library_shared: bool,
     pub deepl_api_key: Option<String>,
     pub deepl_endpoint: Option<String>,
 }
@@ -37,6 +40,7 @@ impl Config {
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|m| *m > 0)
             .unwrap_or(DEFAULT_MAX_BODY_BYTES);
+        let library_shared = !matches!(get("LIBRARY_SHARED").as_deref(), Some("0" | "false"));
 
         Self {
             listen_addr: get("LISTEN_ADDR").unwrap_or_else(|| ":8080".into()),
@@ -44,6 +48,7 @@ impl Config {
             data_dir,
             quota_bytes,
             max_body_bytes,
+            library_shared,
             deepl_api_key: get("DEEPL_API_KEY"),
             deepl_endpoint: get("DEEPL_ENDPOINT"),
         }
