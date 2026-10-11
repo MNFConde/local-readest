@@ -16,6 +16,17 @@ fn main() {
         // matches them to the crashing library by build id, and the NDK linker
         // emits none by default.
         println!("cargo:rustc-link-arg=-Wl,--build-id=sha1");
+
+        // turso_ext 0.6.1's build.rs gates `-ladvapi32` on `cfg!(target_os)`,
+        // which inside a build script evaluates the HOST, not the target:
+        // cross-compiling for Android from a Windows host injects `-ladvapi32`
+        // into the Android link, where the sysroot has no such library (Linux
+        // CI hosts never trigger it, which is why upstream hasn't hit this).
+        // The flag guards no real Android code, so point the linker at a
+        // checked-in empty stub to absorb it; drop this once turso switches to
+        // CARGO_CFG_TARGET_OS.
+        let stubs = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("android-stubs");
+        println!("cargo:rustc-link-search=native={}", stubs.display());
     }
 
     propagate_sentry_dsn();
