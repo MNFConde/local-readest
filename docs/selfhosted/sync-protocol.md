@@ -120,21 +120,71 @@ note/config 的字段一一对应（note: `id,type,cfi,xpointer0/1,page,text,sty
 
 Edge TTS 依赖微软免费接口（websocket 协议）；Rust 实现可用等价 crate 或自实现，**响应形状不变**。
 
-## 6. 服务端配置（本项目 env 集）
+## 6. 书库层（`library` cargo feature，默认开）
+
+书城 + 书目 + 管理页整体收在 `sync-server/src/library/`，只**读取**同步主流程的数据（books 表 JSON、files/ 目录），写仅限自己的三张表（`catalog_books`、`works`、blob 注册）。`cargo build --no-default-features` 时本节全部端点不存在（404），§0–§5 同步契约完全不受影响——解耦保证：未来可机械拆成独立二进制。
+
+### 6.1 内容寻址存储（对 §4 契约透明）
+
+`PUT /api/storage/blob/<key>` 落盘时对 body 算 SHA-256：权威体存 `DATA_DIR/blobs/<sha256>`（已存在**跳过写入**），`files/<uid>/...` 处改为硬链接；硬链接失败回退普通写。同字节文件全服务端只占一份磁盘；key/URL/配额记账/list/stats 均不变（硬链接 stat 报告全尺寸）。启动时 GC：`blobs/` 中链接数 < 2 的文件删除（也可经管理页手动触发）。
+
+### 6.2 书目层（DB）
+
+- `catalog_books(hash TEXT PK, title, author, language, work_id NULL, source_hash NULL, added_at, added_by)`：blob 上传命中 `Readest/Books/<hash>/` 键时自动登记（`added_by` = 上传 uid；元数据取自该用户 books 表 JSON 的 title/author/language，缺失退化用文件名去扩展名；后到的元数据只填空字段，不覆盖人工编辑）。
+- `works(id TEXT PK, title, author)`：作品聚合层。`work_id` 相同的 catalog_books 视为同一作品的不同版本（译本/AI 翻译各自是独立 hash 行，靠 `source_hash` 指向原文形成衍生链）。
+
+### 6.3 OPDS 1.2 书城 /opds
+
+鉴权：HTTP Basic，**用户名 = 邮箱，密码 = 登录码**（argon2 复核；错码/禁用一律 401 + `WWW-Authenticate: Basic`）。与 `/api` 完全隔离，对同步数据只读。
+
+| 端点 | 说明 |
+|---|---|
+| `GET /opds` | 根导航 feed：All Books（含书目总数）+ By Work |
+| `GET /opds/books?page=N` | 全部书目，acquisition feed，每页 50，`rel="next"` 翻页；条目含 title/author/`dcterms:language`/封面/下载链 |
+| `GET /opds/works` | 作品导航 feed：每作品一条目，链到 `/opds/work/<id>`，附版本数 |
+| `GET /opds/work/<id>` | 单作品 feed：该 work_id 下全部版本（各版本独立下载链） |
+| `GET /opds/search?q=` | title/author LIKE 检索（同 books 形态） |
+| `GET /opds/opensearch.xml` | OpenSearch 描述（客户端目录内搜索用） |
+| `GET /opds/download/<hash>` | 从任意持有者副本流式发送（跨 uid 权威出口），扩展名定 MIME（epub>pdf>mobi>…），`Content-Disposition: filename*=UTF-8''` |
+| `GET /opds/cover/<hash>` | 该书任一持有者上传的 png/jpg/webp 封面 |
+
+条目 `<id>` = `urn:readest:book:<hash>`；作品条目 `<id>` = `urn:readest:work:<id>`；已归组条目额外带 `rel="collection" href="/opds/work/<id>"`。`LIBRARY_SHARED=0` 时目录只含调用者自己上传的书（默认共享）。
+
+### 6.4 管理页 /admin 与 /api/admin/*
+
+鉴权：`Authorization: Bearer <ADMIN_TOKEN>`（env 配置；**未设置时全部 /api/admin 端点 404**，`/admin` 页面仍可渲染）。token 比较为 SHA-256 后定长比较。
+
+| 端点 | 说明 |
+|---|---|
+| `GET /admin` | 单文件管理页（内联 JS，token 存 localStorage） |
+| `GET /api/admin/books` | 书目列表（含 workId/sourceHash/addedBy） |
+| `POST /api/admin/books/<hash>` | 编辑 title/author/language；`workId`（null=拆分不归组）；`sourceHash` 衍生链 |
+| `GET /api/admin/works` / `POST /api/admin/works` | 作品列表（含书目数）/ 手工建作品（id=`manual-<hex4>`） |
+| `POST /api/admin/enrich` | 对未归组书目逐本查 Open Library（title+author→work_id）自动归组；逐本容错，返回 `{enriched, failed[]}` |
+| `POST /api/admin/gc` | 触发孤儿 blob GC，返回 `{removed}` |
+| `GET /api/admin/users` / `POST /api/admin/users/<email>/state` | 用户列表 / 停用·启用（建用户与改码仍走 CLI） |
+
+### 6.5 元数据代理补强
+
+`GET /api/metadata/search` 的 OL 映射额外保留 `workKey`/`editionKeys`/`language`（§5 表中形状不变，仅新增字段），供自动归组复用同一查询。
+
+## 7. 服务端配置（本项目 env 集）
 
 | env | 缺省 | 说明 |
 |---|---|---|
 | `LISTEN_ADDR` | `:8080` | |
 | `JWT_SECRET` | 无缺省（必填） | 必填，避免重启失效 |
-| `DATA_DIR` | `./data` | SQLite 文件 `readest.db` 与文件存储 `files/` 的根 |
+| `DATA_DIR` | `./data` | SQLite 文件 `readest.db`、文件存储 `files/` 与去重 `blobs/` 的根 |
 | `QUOTA_BYTES` | 2 GiB（每人） | 存储配额 |
 | `MAX_BODY_BYTES` | 512 MiB | 单请求体上限（axum 默认仅 2 MiB，会拒掉整本书的 blob PUT；注意 blob 体整体进内存， audiobook 等超大文件按需调低/调高） |
+| `LIBRARY_SHARED` | `1` | `0` = OPDS 目录只显示调用者自己的上传 |
+| `ADMIN_TOKEN` | 空 | 空 = /api/admin 全部 404；设了才能用管理页 |
 | `DEEPL_API_KEY` / `DEEPL_ENDPOINT` | 空 | 空 = mock 回显 |
 | `RUST_LOG` | `info` | tracing |
 
 ywz 的 `AUTH_CODE`/`METADATA_BACKEND`/`METADATA_DSN`/`STORAGE_KIND`/`LOCAL_ROOT`/`S3_*` 不保留；用户与登录码管理走 CLI：`sync-server add-user <email> [--code <明文，缺省随机生成并打印>]`、`list-users`、`disable-user <email>`、`passwd <email>`。库表：`users(id TEXT PK, email TEXT UNIQUE, code_sha256 TEXT, code_argon2 TEXT, plan TEXT DEFAULT 'pro', disabled INTEGER DEFAULT 0, created_at TEXT)`。
 
-## 7. 客户端依赖的隐含前提（回归清单）
+## 8. 客户端依赖的隐含前提（回归清单）
 
 1. 登录后所有 API 走 `getBaseUrl()` + `/api`，blob 相对 URL 由 `toFullUrl` 拼接且**非 http 开头必带 Bearer**。
 2. JWT 过期 → `AuthContext.refresh` 用 localStorage `selfhosted_login_code` 静默重登；服务端绝不能让 `/api/auth` 对同一设备的高频重登触发 429（成功会清零计数，天然满足）。
