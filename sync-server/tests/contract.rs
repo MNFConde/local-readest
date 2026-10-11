@@ -22,6 +22,7 @@ pub fn test_config(tag: &str) -> Config {
         jwt_secret: "test-secret-0123456789abcdef".into(),
         data_dir,
         quota_bytes: 1024 * 1024,
+        max_body_bytes: 512 * 1024 * 1024,
         deepl_api_key: None,
         deepl_endpoint: None,
     }
@@ -775,6 +776,7 @@ async fn storage_quota_enforced_on_blob_put() {
         jwt_secret: state.cfg.jwt_secret.clone(),
         data_dir: state.cfg.data_dir.clone(),
         quota_bytes: 8,
+        max_body_bytes: 512 * 1024 * 1024,
         deepl_api_key: None,
         deepl_endpoint: None,
     };
@@ -789,6 +791,32 @@ async fn storage_quota_enforced_on_blob_put() {
         "over-quota put must 413"
     );
     assert_eq!(body, Value::Null); // plain-body error path
+}
+
+#[tokio::test]
+async fn storage_blob_accepts_bodies_over_axum_default_limit() {
+    // Axum's silent default body cap is 2 MiB — without an explicit
+    // DefaultBodyLimit every real book upload 413s while tiny record payloads
+    // pass, which looks exactly like "sync works, upload fails".
+    let big_cfg = Config {
+        listen_addr: "127.0.0.1:0".into(),
+        jwt_secret: "test-secret-0123456789abcdef".into(),
+        data_dir: std::env::temp_dir().join(format!(
+            "sync-server-test-body-limit-{}",
+            std::process::id()
+        )),
+        quota_bytes: 64 * 1024 * 1024,
+        max_body_bytes: 512 * 1024 * 1024,
+        deepl_api_key: None,
+        deepl_endpoint: None,
+    };
+    let _ = std::fs::remove_dir_all(&big_cfg.data_dir);
+    let state = test_state(big_cfg);
+    let token = token_for(&state, "user-s5");
+    let app = routes::router(state);
+    let big = vec![0xABu8; 2 * 1024 * 1024 + 1];
+    let (status, _, _) = put_blob(app, &token, "user-s5/Readest/Books/x/big", big).await;
+    assert_eq!(status, StatusCode::OK, "over-2MiB put must pass");
 }
 
 // ── proxies (T8) — offline paths only; upstream-forwarding paths need network ──

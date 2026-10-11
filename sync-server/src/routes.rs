@@ -44,6 +44,7 @@ async fn cors(req: Request, next: Next) -> Response {
 }
 
 pub fn router(state: SharedState) -> Router {
+    let max_body_bytes = state.cfg.max_body_bytes;
     Router::new()
         .route("/api/health", get(health))
         .route("/api/auth", post(crate::auth::login))
@@ -82,6 +83,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/tts/edge", any(crate::proxy::edge_tts))
         .route("/api/metadata/search", get(crate::proxy::metadata_search))
         .layer(middleware::from_fn(cors))
+        .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes))
         .with_state(state)
 }
 

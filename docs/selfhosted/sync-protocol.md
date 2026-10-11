@@ -128,6 +128,7 @@ Edge TTS 依赖微软免费接口（websocket 协议）；Rust 实现可用等�
 | `JWT_SECRET` | 无缺省（必填） | 必填，避免重启失效 |
 | `DATA_DIR` | `./data` | SQLite 文件 `readest.db` 与文件存储 `files/` 的根 |
 | `QUOTA_BYTES` | 2 GiB（每人） | 存储配额 |
+| `MAX_BODY_BYTES` | 512 MiB | 单请求体上限（axum 默认仅 2 MiB，会拒掉整本书的 blob PUT；注意 blob 体整体进内存， audiobook 等超大文件按需调低/调高） |
 | `DEEPL_API_KEY` / `DEEPL_ENDPOINT` | 空 | 空 = mock 回显 |
 | `RUST_LOG` | `info` | tracing |
 

@@ -6,6 +6,7 @@ pub struct Config {
     pub jwt_secret: String,
     pub data_dir: PathBuf,
     pub quota_bytes: i64,
+    pub max_body_bytes: usize,
     pub deepl_api_key: Option<String>,
     pub deepl_endpoint: Option<String>,
 }
@@ -14,6 +15,12 @@ pub struct Config {
 /// (1<<60); a real quota is safer for a multi-user deployment and callers can
 /// still raise it via QUOTA_BYTES.
 const DEFAULT_QUOTA_BYTES: i64 = 2 * 1024 * 1024 * 1024;
+
+/// Per-request body cap. Axum's silent default is 2 MiB, which rejects every
+/// real book upload on /api/storage/blob while tiny record payloads sail
+/// through. Per-user accounting stays with quota_bytes; this only bounds one
+/// request (and thus one blob held in memory).
+const DEFAULT_MAX_BODY_BYTES: usize = 512 * 1024 * 1024;
 
 impl Config {
     /// Base config without the JWT requirement — used by CLI account
@@ -26,12 +33,17 @@ impl Config {
             .and_then(|v| v.parse::<i64>().ok())
             .filter(|q| *q > 0)
             .unwrap_or(DEFAULT_QUOTA_BYTES);
+        let max_body_bytes = get("MAX_BODY_BYTES")
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|m| *m > 0)
+            .unwrap_or(DEFAULT_MAX_BODY_BYTES);
 
         Self {
             listen_addr: get("LISTEN_ADDR").unwrap_or_else(|| ":8080".into()),
             jwt_secret: String::new(),
             data_dir,
             quota_bytes,
+            max_body_bytes,
             deepl_api_key: get("DEEPL_API_KEY"),
             deepl_endpoint: get("DEEPL_ENDPOINT"),
         }

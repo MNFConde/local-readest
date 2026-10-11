@@ -9,6 +9,8 @@ Readest 自建同步服务端（Rust 重写，多用户版）。API 契约见 [`
 $env:JWT_SECRET = "0123456789abcdef..."
 cargo run --release
 # 默认 LISTEN_ADDR=:8080，数据在 ./data（SQLite + files/）
+# QUOTA_BYTES 默认 2 GiB/人；MAX_BODY_BYTES 默认 512 MiB（单请求体上限，
+# axum 隐含默认仅 2 MiB 会拒掉整本书的上传——调大请自担内存占用，blob 体整体进内存）
 ```
 
 单文件部署：`cargo build --release` 产物为独立 `sync-server.exe`（CGO 无关，SQLite 已 bundled）。
