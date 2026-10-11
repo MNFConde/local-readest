@@ -61,9 +61,25 @@ const run = (file, args, cleanup = () => {}) => {
   });
 };
 
+// `tauri android init` (CLI 2.11.4) writes buildSrc/BuildTask.kt invoking
+// `android-studio-script --target <full triple>`, while the same CLI's parser
+// for that subcommand only accepts the short arch names — so every gradle
+// rustBuild* task dies with "invalid value 'aarch64-linux-android'". Map the
+// triples to the short forms until the CLI's template and parser agree.
+const ANDROID_TARGET_SHORT = {
+  'aarch64-linux-android': 'aarch64',
+  'armv7-linux-androideabi': 'armv7',
+  'i686-linux-android': 'i686',
+  'x86_64-linux-android': 'x86_64',
+};
+const normalizeCliArgs = (args) =>
+  args.includes('android-studio-script')
+    ? args.map((arg) => ANDROID_TARGET_SHORT[arg] ?? arg)
+    : args;
+
 if (!useCef) {
   const tauriCli = createRequire(import.meta.url).resolve('@tauri-apps/cli/tauri.js');
-  run('node', [tauriCli, ...process.argv.slice(2)]);
+  run('node', [tauriCli, ...normalizeCliArgs(process.argv.slice(2))]);
 } else {
   const split = rest.indexOf('--');
   const tauriArgs = split === -1 ? rest : rest.slice(0, split);
