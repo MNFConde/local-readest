@@ -48,8 +48,10 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           gh release create "$tag" --verify-tag --generate-notes \
             --title "Readest Selfhost $tag" || true
-          # Release already exists on retry runs: reuse it.
-          id=$(gh release view "$tag" --json id --jq .id)
+          # Release already exists on retry runs: reuse it. databaseId is the
+          # numeric REST id tauri-action expects (`id` is the GraphQL RE_ node
+          # id, which it silently treats as absent and skips all uploads).
+          id=$(gh release view "$tag" --json databaseId --jq .databaseId)
           echo "release_id=$id" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
@@ -215,8 +217,11 @@ jobs:
 
           # Fetch latest.json from THIS release (desktop job already uploaded
           # it; the needs: relationship guarantees ordering) so the android
-          # merge never races or clobbers a live manifest.
-          gh release download "$tag" -p "latest.json" --clobber
+          # merge never races or clobbers a live manifest. If the desktop leg
+          # produced none, fall back to a fresh manifest so an android-only
+          # hotfix still publishes a usable updater feed.
+          gh release download "$tag" -p "latest.json" --clobber \
+            || printf '{"version":"%s","platforms":{}}' "$version" > latest.json
           jq empty latest.json
 
           apk_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/Readest_${version}_universal.apk"
