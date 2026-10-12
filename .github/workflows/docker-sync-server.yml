@@ -61,7 +61,8 @@ jobs:
           context: ./sync-server
           platforms: ${{ matrix.platform }}
           push: true
-          tags: ${{ env.IMAGE }}:buildcache-${{ env.PLATFORM_PAIR }}
+          # No `tags:` here: pushing by digest forbids tagging the ref; the
+          # merge job assembles the real tags from the per-arch digests.
           cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-${{ env.PLATFORM_PAIR }}
           cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache-${{ env.PLATFORM_PAIR }},mode=max
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
