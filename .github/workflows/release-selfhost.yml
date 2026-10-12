@@ -20,7 +20,9 @@ permissions: read-all
 
 concurrency:
   group: release-selfhost-${{ github.ref }}
-  cancel-in-progress: false
+  # Re-tagging (moving v* to a fix commit) supersedes the in-flight run for
+  # that tag; the fresh run reads this flag and cancels the stale one.
+  cancel-in-progress: true
 
 jobs:
   create-release:
