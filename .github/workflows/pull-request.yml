@@ -192,6 +192,23 @@ jobs:
             npx playwright install --with-deps chromium
           fi
 
+      # The selfhost e2e suite spawns the real sync-server binary; build it
+      # here (with cache) so the suite's 60s beforeAll doesn't race a cold
+      # cargo build on a fresh checkout.
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: cache sync-server deps for e2e
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          workspaces: sync-server
+          key: pr-e2e-server
+          cache-targets: false
+
+      - name: build sync-server binary for e2e
+        working-directory: sync-server
+        run: cargo build --release
+
       - name: run web e2e tests
         id: web_e2e
         working-directory: apps/readest-app

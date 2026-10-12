@@ -46,6 +46,9 @@ vi.mock('@/context/AuthContext', () => ({
 }));
 
 vi.mock('@/utils/supabase', () => ({
+  // SELFHOSTED must exist: browser mode links ESM strictly and
+  // EmailPasswordAuth imports it from this module.
+  SELFHOSTED: false,
   supabase: {
     auth: {
       onAuthStateChange: () => ({ data: { subscription: { unsubscribe: vi.fn() } } }),
