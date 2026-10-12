@@ -243,10 +243,9 @@
       }
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJFMEQ1QjE2OEU1NEIzNTEKUldSUnMxU09GbHNOdmpEaWFMT1crRFpEV2VORzQ2MklxaFc0M1R0ci9xY2c1bENXS0xhM1R1L2sK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlEOTdFN0I1ODQ5M0U1OTAKUldTUTVaT0V0ZWVYbmRiY29iUkMwK3YrYWdCVFZUNFRqZk9YUlBXQTY4QjdDUnQyS2VpOVNRTjAK",
       "endpoints": [
-        "https://download.readest.com/releases/latest.json",
-        "https://github.com/readest/readest/releases/latest/download/latest.json"
+        "https://github.com/MNFConde/local-readest/releases/latest/download/latest.json"
       ]
     },
     "webview-upgrade": {

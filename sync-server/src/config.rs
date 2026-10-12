@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -28,13 +28,29 @@ const DEFAULT_QUOTA_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 /// request (and thus one blob held in memory).
 const DEFAULT_MAX_BODY_BYTES: usize = 512 * 1024 * 1024;
 
+/// Auto-provisioned secret lives inside the data dir, so it travels with the
+/// data on backup/migration and rotates only when the data is removed.
+const JWT_SECRET_FILE: &str = "jwt_secret.key";
+
+/// Portable default: keep everything next to the executable so a
+/// double-clicked sync-server.exe stores its data where it lives, independent
+/// of whatever directory the process happened to start from.
+fn default_data_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("data")))
+        .unwrap_or_else(|| PathBuf::from("./data"))
+}
+
 impl Config {
     /// Base config without the JWT requirement — used by CLI account
     /// management, which doesn't touch tokens.
     pub fn from_env_base() -> Self {
         let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
 
-        let data_dir = PathBuf::from(get("DATA_DIR").unwrap_or_else(|| "./data".into()));
+        let data_dir = get("DATA_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(default_data_dir);
         let quota_bytes = get("QUOTA_BYTES")
             .and_then(|v| v.parse::<i64>().ok())
             .filter(|q| *q > 0)
@@ -59,18 +75,11 @@ impl Config {
     }
 
     /// # Errors
-    /// Returns an error when `JWT_SECRET` is absent: unlike the Go reference
-    /// (random secret per boot, silently invalidating all tokens) we require
-    /// it so restarts don't log every device out.
+    /// An explicitly set but too-short `JWT_SECRET` is a configuration
+    /// mistake and errors out; secret-file I/O failures propagate.
     pub fn from_env() -> anyhow::Result<Self> {
         let mut cfg = Self::from_env_base();
-        let secret = std::env::var("JWT_SECRET")
-            .ok()
-            .filter(|v| !v.is_empty() && v.len() >= 16)
-            .ok_or_else(|| {
-                anyhow::anyhow!("JWT_SECRET must be set (>=16 chars); tokens survive restarts only while it stays the same")
-            })?;
-        cfg.jwt_secret = secret;
+        cfg.jwt_secret = resolve_jwt_secret(&cfg.data_dir, std::env::var("JWT_SECRET").ok())?;
         Ok(cfg)
     }
 
@@ -86,5 +95,104 @@ impl Config {
     /// hard links (library feature): identical bytes are stored once.
     pub fn blobs_root(&self) -> PathBuf {
         self.data_dir.join("blobs")
+    }
+}
+
+/// JWT secret resolution, portable-first:
+/// 1. a valid `JWT_SECRET` env (>=16 chars) always wins;
+/// 2. otherwise the secret is persisted to `<data_dir>/jwt_secret.key` —
+///    generated on first boot, reused afterwards — so a double-clicked
+///    server keeps tokens valid across restarts with zero configuration.
+///    Removing the data dir rotates the secret and logs every device out.
+fn resolve_jwt_secret(data_dir: &Path, env_secret: Option<String>) -> anyhow::Result<String> {
+    if let Some(secret) = env_secret.filter(|v| !v.is_empty()) {
+        if secret.len() >= 16 {
+            return Ok(secret);
+        }
+        anyhow::bail!(
+            "JWT_SECRET must be >=16 chars (got {})",
+            secret.len()
+        );
+    }
+    let file = data_dir.join(JWT_SECRET_FILE);
+    if let Ok(existing) = std::fs::read_to_string(&file) {
+        let secret = existing.trim();
+        if secret.len() >= 16 {
+            return Ok(secret.to_string());
+        }
+        // empty or truncated file: fall through and regenerate
+    }
+    let secret = generate_jwt_secret();
+    std::fs::create_dir_all(data_dir)?;
+    std::fs::write(&file, &secret)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(secret)
+}
+
+fn generate_jwt_secret() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_data_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sync-server-cfg-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn env_secret_wins_over_persisted_file() {
+        let dir = temp_data_dir("env-wins");
+        std::fs::write(dir.join(JWT_SECRET_FILE), "0123456789abcdef0123456789abcdef").unwrap();
+        let got = resolve_jwt_secret(&dir, Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0".into())).unwrap();
+        assert_eq!(got, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn short_env_secret_is_an_error() {
+        let dir = temp_data_dir("short-env");
+        assert!(resolve_jwt_secret(&dir, Some("tooshort".into())).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn generates_persists_and_reuses_secret() {
+        let dir = temp_data_dir("gen-reuse");
+        let first = resolve_jwt_secret(&dir, None).unwrap();
+        assert!(first.len() >= 16);
+        assert!(dir.join(JWT_SECRET_FILE).exists());
+        let second = resolve_jwt_secret(&dir, None).unwrap();
+        assert_eq!(first, second, "secret must survive restarts");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reuses_existing_file_secret() {
+        let dir = temp_data_dir("file");
+        std::fs::write(dir.join(JWT_SECRET_FILE), "0123456789abcdef0123456789abcdef\n").unwrap();
+        let got = resolve_jwt_secret(&dir, None).unwrap();
+        assert_eq!(got, "0123456789abcdef0123456789abcdef");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn regenerates_over_garbage_file() {
+        let dir = temp_data_dir("garbage");
+        std::fs::write(dir.join(JWT_SECRET_FILE), "tiny").unwrap();
+        let got = resolve_jwt_secret(&dir, None).unwrap();
+        assert!(got.len() >= 16);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

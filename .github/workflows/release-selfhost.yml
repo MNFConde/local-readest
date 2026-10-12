@@ -1,0 +1,303 @@
+name: Release Selfhost
+
+# Fork release pipeline: tag push (v*) builds every artifact and attaches it
+# to one GitHub Release, which also feeds the in-app updater channels:
+#   - Windows x86_64 NSIS installer + updater signature (tauri updater)
+#   - Android universal APK (arm64 + x86_64), published under BOTH
+#     android-arm64 and android-universal latest.json keys — the universal
+#     APK is a superset, so a per-ABI rebuild (~40min) would be redundant
+#   - sync-server static/portable binaries (linux musl x86_64+aarch64,
+#     macOS arm64+x86_64, Windows x86_64)
+# Desktop updater artifacts and latest.json are produced by tauri-action
+# (createUpdaterArtifacts: true in tauri.conf.json); the Android job runs
+# after the desktop job and merges its entries into that same latest.json.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions: read-all
+
+concurrency:
+  group: release-selfhost-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  create-release:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.release_id }}
+      tag: ${{ steps.create.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: get version
+        id: version
+        run: echo "version=$(node -p "require('./apps/readest-app/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: create release
+        id: create
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          gh release create "$tag" --verify-tag --generate-notes \
+            --title "Readest Selfhost $tag" || true
+          # Release already exists on retry runs: reuse it.
+          id=$(gh release view "$tag" --json id --jq .id)
+          echo "release_id=$id" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  build-desktop:
+    needs: create-release
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: setup node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: install dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: copy pdfjs-dist and simplecc-dist to public directory
+        run: pnpm --filter @readest/readest-app setup-vendors
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          key: selfhost-windows-x86_64-cargo
+
+      - name: create .env.local file for Next.js
+        run: |
+          echo "NEXT_PUBLIC_APP_PLATFORM=tauri" >> .env.local
+          cp .env.local apps/readest-app/.env.local
+
+      - name: build Windows NSIS and upload
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        id: tauri
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          NODE_OPTIONS: '--max-old-space-size=8192'
+        with:
+          projectPath: apps/readest-app
+          tauriScript: pnpm tauri
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          args: '--target x86_64-pc-windows-msvc --bundles nsis'
+
+  build-android:
+    needs: [create-release, build-desktop]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: setup node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: setup Java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: setup Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+        with:
+          # The legacy `tools` package (part of the action's default) no longer
+          # exists in the SDK repository and makes sdkmanager fail.
+          packages: 'platform-tools'
+
+      - name: install NDK
+        run: sdkmanager "ndk;28.2.13676358"
+
+      - name: install dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: copy pdfjs-dist and simplecc-dist to public directory
+        run: pnpm --filter @readest/readest-app setup-vendors
+
+      - name: install Rust stable (android targets)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          key: selfhost-android-cargo
+
+      - name: create .env.local file for Next.js
+        run: |
+          echo "NEXT_PUBLIC_APP_PLATFORM=tauri" >> .env.local
+          cp .env.local apps/readest-app/.env.local
+
+      - name: prepare signing keystore
+        env:
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          cd apps/readest-app/
+          rm -rf src-tauri/gen/android
+          pnpm tauri android init
+          pnpm tauri icon ../../data/icons/readest-book.png
+          git checkout .
+
+          pushd src-tauri/gen/android
+          echo "keyAlias=${ANDROID_KEY_ALIAS}" > keystore.properties
+          echo "password=${ANDROID_KEY_PASSWORD}" >> keystore.properties
+          base64 -d <<< "${ANDROID_KEY_BASE64}" > "$RUNNER_TEMP/keystore.jks"
+          echo "storeFile=$RUNNER_TEMP/keystore.jks" >> keystore.properties
+          popd
+
+      - name: build and upload universal APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358
+          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          cd apps/readest-app/
+          version=${{ needs.create-release.outputs.version }}
+          tag=${{ needs.create-release.outputs.tag }}
+          apk_path=src-tauri/gen/android/app/build/outputs/apk/universal/release
+          apk_name=Readest_${version}_universal.apk
+
+          pnpm tauri android build
+          cp ${apk_path}/app-universal-release.apk "$apk_name"
+
+          # Sign the APK with the fork updater key (same minisign key as the
+          # desktop updater artifacts) so latest.json entries verify.
+          pnpm tauri signer sign "$apk_name"
+
+          echo "Uploading $apk_name to GitHub release"
+          gh release upload "$tag" "$apk_name" "$apk_name.sig" --clobber
+
+      - name: merge android entries into latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd apps/readest-app/
+          version=${{ needs.create-release.outputs.version }}
+          tag=${{ needs.create-release.outputs.tag }}
+
+          # Fetch latest.json from THIS release (desktop job already uploaded
+          # it; the needs: relationship guarantees ordering) so the android
+          # merge never races or clobbers a live manifest.
+          gh release download "$tag" -p "latest.json" --clobber
+          jq empty latest.json
+
+          apk_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/Readest_${version}_universal.apk"
+          sig=$(cat "Readest_${version}_universal.apk.sig")
+
+          for key in android-arm64 android-universal; do
+            jq --arg key "$key" --arg url "$apk_url" --arg sig "$sig" \
+              '.platforms[$key] = {signature: $sig, url: $url}' latest.json > tmp.$$.json \
+              && mv tmp.$$.json latest.json
+          done
+
+          echo "Uploading merged latest.json"
+          gh release upload "$tag" latest.json --clobber
+
+  build-server:
+    needs: create-release
+    permissions:
+      contents: write
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            cross: true
+            archive: tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            cross: true
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          workspaces: sync-server
+          key: selfhost-server-${{ matrix.target }}
+
+      - name: install cross (musl targets)
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: build
+        working-directory: sync-server
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: package and upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=${{ needs.create-release.outputs.version }}
+          tag=${{ needs.create-release.outputs.tag }}
+          target=${{ matrix.target }}
+          artifact="sync-server_${version}_${target}"
+
+          cd sync-server
+          bin_dir="target/${target}/release"
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            cp "${bin_dir}/sync-server.exe" sync-server.exe
+            7z a "${artifact}.zip" sync-server.exe
+            gh release upload "$tag" "${artifact}.zip" --clobber
+          else
+            tar czf "${artifact}.tar.gz" -C "$bin_dir" sync-server
+            gh release upload "$tag" "${artifact}.tar.gz" --clobber
+          fi

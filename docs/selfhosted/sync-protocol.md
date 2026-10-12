@@ -173,8 +173,8 @@ Edge TTS 依赖微软免费接口（websocket 协议）；Rust 实现可用等�
 | env | 缺省 | 说明 |
 |---|---|---|
 | `LISTEN_ADDR` | `:8080` | |
-| `JWT_SECRET` | 无缺省（必填） | 必填，避免重启失效 |
-| `DATA_DIR` | `./data` | SQLite 文件 `readest.db`、文件存储 `files/` 与去重 `blobs/` 的根 |
+| `JWT_SECRET` | 自动生成落盘 | 未设时首启生成随机密钥写入 `<DATA_DIR>/jwt_secret.key` 并持久复用（token 跨重启不失效；删 data/ 即轮换）；显式设置须 ≥16 字符 |
+| `DATA_DIR` | `<exe目录>/data` | SQLite 文件 `readest.db`、文件存储 `files/` 与去重 `blobs/` 的根（便携缺省：跟 exe 走，不占 C 盘） |
 | `QUOTA_BYTES` | 2 GiB（每人） | 存储配额 |
 | `MAX_BODY_BYTES` | 512 MiB | 单请求体上限（axum 默认仅 2 MiB，会拒掉整本书的 blob PUT；注意 blob 体整体进内存， audiobook 等超大文件按需调低/调高） |
 | `LIBRARY_SHARED` | `1` | `0` = OPDS 目录只显示调用者自己的上传 |

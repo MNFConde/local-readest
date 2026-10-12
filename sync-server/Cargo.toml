@@ -1,6 +1,6 @@
 [package]
 name = "sync-server"
-version = "0.1.0"
+version = "0.12.13"
 edition = "2021"
 description = "Self-hosted Readest sync server (Rust rewrite of ywz626's readest-sync-server, with per-user accounts)"
 license = "AGPL-3.0"

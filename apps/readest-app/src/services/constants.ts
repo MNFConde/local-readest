@@ -966,13 +966,20 @@ export const SHARE_TOKEN_LENGTH = 22;
 export const SHARE_PRESIGN_TTL_SECONDS = 300;
 export const SHARE_CFI_MAX_LENGTH = 512;
 
-const LATEST_DOWNLOAD_BASE_URL = 'https://download.readest.com/releases';
+// Fork update channel: artifacts + latest.json live on this repo's GitHub
+// Releases (self-signed with the fork updater key — see tauri.conf.json
+// updater.pubkey). Never point these back at the official download host:
+// an official update would overwrite the fork's self-hosted features.
+const LATEST_DOWNLOAD_BASE_URL =
+  'https://github.com/MNFConde/local-readest/releases/latest/download';
 
 export const READEST_UPDATER_FILE = `${LATEST_DOWNLOAD_BASE_URL}/latest.json`;
 
 export const READEST_CHANGELOG_FILE = `${LATEST_DOWNLOAD_BASE_URL}/release-notes.json`;
 
-export const READEST_NIGHTLY_UPDATER_FILE = 'https://download.readest.com/nightly/latest.json';
+// The fork ships no nightly channel; keep the shape but 404 cleanly so the
+// nightly resolution falls back to the stable manifest above.
+export const READEST_NIGHTLY_UPDATER_FILE = `${LATEST_DOWNLOAD_BASE_URL}/nightly-latest.json`;
 
 // Public (verification) key, identical to src-tauri/tauri.conf.json `updater.pubkey`.
 // Used to verify nightly artifacts in the custom install flows (portable /
