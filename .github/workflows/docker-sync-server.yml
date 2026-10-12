@@ -108,16 +108,16 @@ jobs:
       - name: pick tags
         run: |
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
-            echo "TAGS=${IMAGE}:${GITHUB_REF_NAME#v},${IMAGE}:latest" >> "$GITHUB_ENV"
+            echo "TAG_ARGS=-t ${IMAGE}:${GITHUB_REF_NAME#v} -t ${IMAGE}:latest" >> "$GITHUB_ENV"
           else
-            echo "TAGS=${IMAGE}:edge" >> "$GITHUB_ENV"
+            echo "TAG_ARGS=-t ${IMAGE}:edge" >> "$GITHUB_ENV"
           fi
 
       - name: merge manifest
         working-directory: /tmp/digests
         run: |
-          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$TAGS") \
-            $(printf '${{ env.IMAGE }}@sha256:%s ' *)
+          docker buildx imagetools create $TAG_ARGS \
+            $(printf "${IMAGE}@sha256:%s " *)
 
       - name: inspect
         run: docker buildx imagetools inspect "${IMAGE}:$( [[ "$GITHUB_REF_TYPE" == "tag" ]] && echo latest || echo edge )"
