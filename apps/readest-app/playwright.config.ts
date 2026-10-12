@@ -18,6 +18,10 @@ const PORT = 3000;
 
 export default defineConfig({
   testDir: './e2e/tests',
+  // selfhost-sync.spec.ts needs the self-hosted build env (server-url field
+  // on /auth) and its own sync-server lifecycle — it runs only in the
+  // selfhost lane (playwright.selfhost.config.ts).
+  testMatch: /^(?!.*selfhost).*\.spec\.ts$/,
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
