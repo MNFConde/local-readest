@@ -42,6 +42,20 @@ fn default_data_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("./data"))
 }
 
+/// A bare ":port" is NOT "bind on all interfaces": `ToSocketAddrs` feeds it to
+/// `getaddrinfo(NULL)` without AI_PASSIVE, which Windows resolves to one
+/// specific address of the machine (observed: a link-local IPv6) — the process
+/// then only accepts connections on that single address while 127.0.0.1 and the
+/// LAN refuse. Always bind an explicit host; normalize bare-port values so old
+/// env files with `LISTEN_ADDR=:8080` keep working.
+fn normalize_listen_addr(addr: String) -> String {
+    if addr.starts_with(':') {
+        format!("0.0.0.0{addr}")
+    } else {
+        addr
+    }
+}
+
 impl Config {
     /// Base config without the JWT requirement — used by CLI account
     /// management, which doesn't touch tokens.
@@ -62,7 +76,7 @@ impl Config {
         let library_shared = !matches!(get("LIBRARY_SHARED").as_deref(), Some("0" | "false"));
 
         Self {
-            listen_addr: get("LISTEN_ADDR").unwrap_or_else(|| ":8080".into()),
+            listen_addr: normalize_listen_addr(get("LISTEN_ADDR").unwrap_or_else(|| "0.0.0.0:8080".into())),
             jwt_secret: String::new(),
             data_dir,
             quota_bytes,
@@ -149,6 +163,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn listen_addr_normalizes_bare_port_to_wildcard() {
+        assert_eq!(normalize_listen_addr(":8080".into()), "0.0.0.0:8080");
+        assert_eq!(normalize_listen_addr(":0".into()), "0.0.0.0:0");
+        assert_eq!(
+            normalize_listen_addr("127.0.0.1:8080".into()),
+            "127.0.0.1:8080"
+        );
+        assert_eq!(
+            normalize_listen_addr("[::1]:8080".into()),
+            "[::1]:8080"
+        );
     }
 
     #[test]
