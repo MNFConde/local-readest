@@ -63,3 +63,10 @@ apps/readest.koplugin/native/localsend-bin/target/
 # scripts/tauri.mjs parks the wry Cargo.lock here during a Linux CEF build
 /Cargo.lock.wry
 sync-server/data/
+.openbitfun/
+
+# local-only workspace files (cairn/zcode layer, self-host dev env, build logs)
+/AGENTS.md
+/.zcodeignore
+apps/readest-app/.env.server
+*.log
