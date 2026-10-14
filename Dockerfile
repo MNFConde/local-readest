@@ -39,6 +39,11 @@ ARG NEXT_PUBLIC_API_BASE_URL
 ARG NEXT_PUBLIC_OBJECT_STORAGE_TYPE
 ARG NEXT_PUBLIC_STORAGE_FIXED_QUOTA
 ARG NEXT_PUBLIC_TRANSLATION_FIXED_QUOTA
+# Self-hosted sync-server mode (build-time inlined): when set to `1` the web
+# client drops Supabase and logs in against the operator's sync server instead
+# (login form gains the server-address field). Empty keeps upstream behavior.
+ARG NEXT_PUBLIC_SELFHOSTED
+ENV NEXT_PUBLIC_SELFHOSTED=$NEXT_PUBLIC_SELFHOSTED
 COPY --from=dependencies /app/node_modules /app/node_modules
 COPY --from=dependencies /app/apps/readest-app/node_modules /app/apps/readest-app/node_modules
 COPY --from=dependencies /app/apps/readest-app/public/vendor /app/apps/readest-app/public/vendor

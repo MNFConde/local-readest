@@ -26,6 +26,7 @@ git apply --3way docs/selfhosted/readest-client-selfhost.patch   # 解 6+ 文件
 - `src/utils/supabase.ts`：`NEXT_PUBLIC_SELFHOSTED=1` 开关；selfhost 下 supabase client 为 null（调用点 `supabase!`）
 - `src/utils/access.ts`、`src/helpers/auth.ts`、`src/context/AuthContext.tsx`：token/用户派生走 JWT `sub`；过期后用持久化账号密码静默重登
 - `src/app/auth/*`（AuthPanel / EmailPasswordAuth / page / recovery / update）：登录 UI——服务端地址框 + 账号（邮箱）框 + 密码框（可空），隐藏 OAuth
+- `src/admin/`（自包含管理页子树）+ `src/app/admin/page.tsx`（单路由挂载）：多端管理控制台（建/删用户、重置密码、角色、停用启用、删除书目、blob GC、Open Library 自动归组），admin 账号在 web/桌面/安卓任意端访问 `/admin`；**工程约束**：只依赖 node_modules 的 daisyUI/Radix 与 fork 自有模块（`selfhostedAuth.jwtRole` 解码 role claim），不 import 上游业务组件，上游合并冲突面≈0
 - `src/hooks/useQuotaStats.ts`、`useAvailablePlans.ts`：配额走自建服务端；跳过 Stripe/IAP
 - `src/libs/storage.ts`、`src/libs/sync.ts`、`src/libs/share.ts`、`src/libs/user.ts`、`src/libs/metadata.ts`、`src/services/translators/providers/deepl.ts`：**API 端点一律调用时求值**（模块级常量会在登录前固化为官方域名）+ blob 相对 URL 经 `toFullUrl` 拼接且带 Bearer 头（web 的 XHR 分支也必须走 `toFullUrl`）；`src/utils/transfer.ts`、三个 sync provider：`tauriUpload` headers 类型修正为 `Record`
 - `src/services/transferManager.ts`：错误信息透传（利于排障自建服务端错误）
@@ -76,6 +77,15 @@ git apply --3way docs/selfhosted/readest-client-selfhost.patch   # 解 6+ 文件
    根级新生成的 gradle 工程文件保留）并补 `app/src/main/res/values/ic_launcher_background.xml`
    （模板漏发，颜色对齐 drawable 的 #3DDC84）。已提交的自动修复：`src-tauri/build.rs`（advapi32 搜索路径）、
    `scripts/tauri.mjs`（android-studio-script 三元组→短架构名归一）。
+
+## 网页端自托管部署（2026-10-14）
+
+网页客户端与桌面/安卓共用一套代码，靠**构建期** `NEXT_PUBLIC_SELFHOSTED=1` 切到自托管模式（登录页出现服务端地址框、Supabase 关闭）。上游根 `Dockerfile` 本就是网页自托管镜像（运行时 `SELF_HOSTED=true` 解锁会员功能），本项目只补了 `NEXT_PUBLIC_SELFHOSTED` ARG 透传（2 行，不传时保持上游官方模式不变）。
+
+- **Docker 一键栈**（推荐，NAS/Linux）：仓库根 `compose.selfhost.yml`——`sync-server`（:8080，数据落卷）+ `web`（:3000，`NEXT_PUBLIC_SELFHOSTED=1` 构建）。`docker compose -f compose.selfhost.yml up -d --build`；建首个管理员：`docker compose -f compose.selfhost.yml exec sync-server sync-server add-user <email> --admin`。注意根镜像构建需要 git 子模块已初始化（Dockerfile 内置检查）。
+- **Windows 原生（与 sync-server.exe 同机）**：`cd apps/readest-app && NEXT_PUBLIC_SELFHOSTED=1 pnpm build-web && pnpm start-web`（或把 `NEXT_PUBLIC_SELFHOSTED=1` 写进 `.env.local`，`pnpm build-web` 经 dotenv 自动加载）。浏览器开 `http://<PC>:3000`，登录时服务端地址填 `http://<PC>:8080`（跨源已被服务端 CORS reflect 覆盖，无需反代）。
+- 管理页：admin 账号登录后浏览器直达 `http://<host>:3000/admin`（无侧栏入口，收藏书签即可；服务端内嵌静态页 `:8080/admin` 继续作为兜底）。
+- 桌面/安卓包要获得管理页与账号密码登录，需在 `.env.local` 设 `NEXT_PUBLIC_SELFHOSTED=1` 后重打包（随下一版发布）。
 
 ## 重生成补丁
 

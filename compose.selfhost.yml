@@ -1,0 +1,46 @@
+# Self-hosted Readest in one stack: the Rust sync-server plus the web client
+# built in self-hosted mode (NEXT_PUBLIC_SELFHOSTED=1). New fork-owned file —
+# upstream ships no root compose, so this never conflicts.
+#
+#   docker compose -f compose.selfhost.yml up -d --build
+#
+# Then: create the first (admin) account, open http://<host>:3000, enter
+# http://<host>:8080 as the sync server address, and sign in.
+#
+#   docker compose -f compose.selfhost.yml exec sync-server \
+#       sync-server add-user admin@example.com --admin
+#
+# The web client needs no per-user build: the server address is entered at
+# login and kept in localStorage. Cross-origin :3000 → :8080 works because the
+# sync server reflects any Origin (docs/selfhosted/sync-protocol.md).
+
+services:
+  sync-server:
+    build: ./sync-server
+    restart: unless-stopped
+    ports:
+      - '8080:8080'
+    volumes:
+      - sync-data:/data
+    environment:
+      # Unset JWT_SECRET auto-generates into the volume on first boot and
+      # survives restarts. Uncomment to pin:
+      # JWT_SECRET: change-me-at-least-16-chars
+      # QUOTA_BYTES: 2147483648        # per-user quota (default 2 GiB)
+      # LIBRARY_SHARED: '0'            # OPDS/library visible to uploader only
+      # LISTEN_ADDR: 0.0.0.0:8080      # default
+      # Operator fallback token for the embedded /admin static page; the
+      # client admin page uses admin-account JWTs instead.
+      # ADMIN_TOKEN: change-me-operator-token
+
+  web:
+    build:
+      context: .
+      args:
+        NEXT_PUBLIC_SELFHOSTED: '1'
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+
+volumes:
+  sync-data:
