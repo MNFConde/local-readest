@@ -250,6 +250,19 @@ export function jwtToUser(token: string | null | undefined): SelfhostedUser | nu
 }
 
 /**
+ * Authorization role carried in the self-hosted JWT (`'admin'` | `'user'`).
+ * Tokens issued before the role model have no claim — treated as `'user'`.
+ *
+ * SECURITY: see {@link jwtToUser} — client-side decoding gates UI entry only;
+ * the server enforces the admin role on every /api/admin request.
+ */
+export function jwtRole(token: string | null | undefined): 'admin' | 'user' | null {
+  if (!token) return null;
+  const payload = decodeJwtPayload(token);
+  return payload?.['role'] === 'admin' ? 'admin' : 'user';
+}
+
+/**
  * Parse the `sub` claim from a JWT payload WITHOUT verifying the signature.
  * Thin wrapper over {@link jwtToUser} kept for callers that only need the id.
  *

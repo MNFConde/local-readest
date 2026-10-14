@@ -49,6 +49,18 @@ describe('selfhosted auth', () => {
     expect(jwtSub('invalid')).toBeNull();
   });
 
+  it('jwtRole reads the role claim; missing claim means plain user', async () => {
+    const { jwtRole } = await import('@/services/selfhostedAuth');
+    expect(jwtRole(fakeJwt)).toBe('user'); // pre-role tokens carry no claim
+    const mkJwt = (payload: object) =>
+      b64url('{"alg":"HS256","typ":"JWT"}') + '.' + b64url(JSON.stringify(payload)) + '.sig';
+    expect(jwtRole(mkJwt({ sub: 'a', plan: 'pro', role: 'admin', exp: 1 }))).toBe('admin');
+    expect(jwtRole(mkJwt({ sub: 'a', plan: 'pro', role: 'user', exp: 1 }))).toBe('user');
+    expect(jwtRole(null)).toBeNull();
+    // Unparseable tokens decode as plain user (never admin).
+    expect(jwtRole('garbage')).toBe('user');
+  });
+
   it('jwtToUser derives id (and email when present) from a self-hosted JWT', async () => {
     const { jwtToUser } = await import('@/services/selfhostedAuth');
     expect(jwtToUser(fakeJwt)).toEqual({ id: 'owner', email: undefined });
