@@ -16,13 +16,15 @@
 ### POST /api/auth（公开）
 
 请求头：`X-Device-Id: <uuid>`（客户端 localStorage 持久化的设备号，用于爆破锁定）。
-请求体：`{"code": "<登录码>"}`。
+请求体：`{"email": "<账号邮箱>", "password": "<密码>"}`；`password` 允许空串（免密账号）。
+
+向后兼容：旧客户端的 `{"code": "<登录码>"}` 继续接受——`code` 是 `password` 的旧拼法（同一列对），不带 email 的密码按「码即身份」老路径校验。
 
 响应：
 | 场景 | 状态 | 体/头 |
 |---|---|---|
 | 成功 | 200 | `{"access_token":"<JWT>","token_type":"bearer"}` |
-| 码错误 | 401 | `{"error":"invalid code"}` |
+| 凭据错误 | 401 | `{"error":"invalid code"}`（历史拼写，email/password 路径沿用同一响应体） |
 | 设备/IP 锁定 | 429 | `{"error":"too many failures, device locked","code":"LOCKED"}` + `Retry-After: <秒>` |
 | 体解析失败 | 400 | `{"error":"bad request"}` |
 | 内部错误 | 500 | `{"error":"internal"}` |
@@ -31,7 +33,7 @@
 
 JWT（HS256）claims：`sub`（用户标识 = 数据隔离键）、`plan: "pro"`、`exp`、`iat`。客户端对 JWT 只做**不验签**的 payload 解码（`jwtToUser` 读 `sub`/`email`），服务端是唯一信任边界。
 
-**本项目偏离（多用户）**：`code` 不再是全局共享码，而是每用户独立登录码（服务端随机生成的高熵码）。校验流程：SHA-256(code) 索引定位用户 → argon2id 复核（允许用户自设弱码）→ 签发 `sub=<user_id>`、`email=<用户邮箱>`、`plan=pro`。**TTL 缩短为 1 小时**：客户端 `AuthContext.refresh` 在过期后用持久化登录码静默重登（客户端补丁已实现），无需刷新端点。禁用用户返回 401 `{"error":"invalid code"}`。
+**本项目偏离（多用户）**：凭据为每用户独立的「账号（邮箱）+ 密码」。历史沿革：曾是每用户独立登录码（服务端随机生成的高熵码），账号+密码模型落地后原码**原样作为密码**使用，零迁移；`add-user --password ""` 可建免密账号（知道邮箱即可登入，服务端启动时警告）。校验流程：SHA-256(secret) 索引 + email 定位用户 → argon2id 复核（允许自设弱密码）→ 签发 `sub=<user_id>`、`email=<用户邮箱>`、`plan=pro`。**TTL 缩短为 1 小时**：客户端 `AuthContext.refresh` 在过期后用持久化的账号密码静默重登（客户端补丁已实现），无需刷新端点。禁用用户返回 401 `{"error":"invalid code"}`。
 
 ### 受保护路由的鉴权失败响应
 
@@ -135,7 +137,7 @@ Edge TTS 依赖微软免费接口（websocket 协议）；Rust 实现可用等�
 
 ### 6.3 OPDS 1.2 书城 /opds
 
-鉴权：HTTP Basic，**用户名 = 邮箱，密码 = 登录码**（argon2 复核；错码/禁用一律 401 + `WWW-Authenticate: Basic`）。与 `/api` 完全隔离，对同步数据只读。
+鉴权：HTTP Basic，**用户名 = 邮箱（账号），密码 = 账号密码**（argon2 复核；错凭据/禁用一律 401 + `WWW-Authenticate: Basic`）。与 `/api` 完全隔离，对同步数据只读。
 
 | 端点 | 说明 |
 |---|---|
@@ -172,7 +174,7 @@ Edge TTS 依赖微软免费接口（websocket 协议）；Rust 实现可用等�
 
 | env | 缺省 | 说明 |
 |---|---|---|
-| `LISTEN_ADDR` | `:8080` | |
+| `LISTEN_ADDR` | `0.0.0.0:8080` | 裸 `":8080"` 自动归一化为 `0.0.0.0:8080`（裸端口经 getaddrinfo 在 Windows 会解析成单个本机地址，127.0.0.1/局域网全部拒绝连接） |
 | `JWT_SECRET` | 自动生成落盘 | 未设时首启生成随机密钥写入 `<DATA_DIR>/jwt_secret.key` 并持久复用（token 跨重启不失效；删 data/ 即轮换）；显式设置须 ≥16 字符 |
 | `DATA_DIR` | `<exe目录>/data` | SQLite 文件 `readest.db`、文件存储 `files/` 与去重 `blobs/` 的根（便携缺省：跟 exe 走，不占 C 盘） |
 | `QUOTA_BYTES` | 2 GiB（每人） | 存储配额 |
@@ -182,7 +184,7 @@ Edge TTS 依赖微软免费接口（websocket 协议）；Rust 实现可用等�
 | `DEEPL_API_KEY` / `DEEPL_ENDPOINT` | 空 | 空 = mock 回显 |
 | `RUST_LOG` | `info` | tracing |
 
-ywz 的 `AUTH_CODE`/`METADATA_BACKEND`/`METADATA_DSN`/`STORAGE_KIND`/`LOCAL_ROOT`/`S3_*` 不保留；用户与登录码管理走 CLI：`sync-server add-user <email> [--code <明文，缺省随机生成并打印>]`、`list-users`、`disable-user <email>`、`passwd <email>`。库表：`users(id TEXT PK, email TEXT UNIQUE, code_sha256 TEXT, code_argon2 TEXT, plan TEXT DEFAULT 'pro', disabled INTEGER DEFAULT 0, created_at TEXT)`。
+ywz 的 `AUTH_CODE`/`METADATA_BACKEND`/`METADATA_DSN`/`STORAGE_KIND`/`LOCAL_ROOT`/`S3_*` 不保留；用户与密码管理走 CLI：`sync-server add-user <email> [--password <明文，缺省随机生成并打印；空串 = 免密账号>]`、`list-users`、`disable-user <email>`、`passwd <email> [--password <新密码>]`（`--code` 仍被接受为别名）。库表：`users(id TEXT PK, email TEXT UNIQUE, code_sha256 TEXT, code_argon2 TEXT, plan TEXT DEFAULT 'pro', disabled INTEGER DEFAULT 0, created_at TEXT)`（`code_sha256`/`code_argon2` 列名沿用登录码时代，现承载密码）。
 
 ## 8. 客户端依赖的隐含前提（回归清单）
 

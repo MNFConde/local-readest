@@ -11,10 +11,22 @@
 
 const SERVER_URL_KEY = 'selfhosted_server_url';
 
+/**
+ * Normalize a user-entered server URL: trim whitespace and trailing slashes,
+ * defaulting a missing scheme to http:// — browsers reject schemeless values
+ * in URL inputs, yet `127.0.0.1:8080` is the most common self-hosted address.
+ * Returns '' when nothing usable remains.
+ */
+export function normalizeServerUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  return /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+}
+
 /** Persist the user-entered sync server base URL (no trailing slash). */
 export function saveSelfhostedServerUrl(url: string): void {
   if (typeof window === 'undefined') return;
-  const normalized = url.trim().replace(/\/+$/, '');
+  const normalized = normalizeServerUrl(url);
   if (!normalized) {
     localStorage.removeItem(SERVER_URL_KEY);
     return;

@@ -236,6 +236,115 @@ async fn disabled_user_cannot_login() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
+// ── auth, account+password model (T5b) ────────────────────────────────────
+
+#[tokio::test]
+async fn login_with_email_and_password_returns_bearer_jwt() {
+    let state = test_state(test_config("login-email"));
+    let user_id = seed_user(&state, "dana@example.com", "code-dana-123");
+
+    let app = routes::router(state);
+    let (status, body, _) = request_with_headers(
+        app,
+        "POST",
+        "/api/auth",
+        None,
+        Some(serde_json::json!({ "email": "dana@example.com", "password": "code-dana-123" })),
+        &[("X-Device-Id", "dev-dana")],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    // An existing login code works verbatim as the password (zero migration).
+    let token = body["access_token"].as_str().expect("access_token");
+    let claims = sync_server::jwt::verify("test-secret-0123456789abcdef", token).unwrap();
+    assert_eq!(claims.sub, user_id);
+    assert_eq!(claims.email.as_deref(), Some("dana@example.com"));
+}
+
+#[tokio::test]
+async fn login_email_with_wrong_password_is_unauthorized() {
+    let state = test_state(test_config("login-email-bad"));
+    seed_user(&state, "erin@example.com", "code-erin-123");
+
+    let app = routes::router(state);
+    let (status, body, _) = request_with_headers(
+        app,
+        "POST",
+        "/api/auth",
+        None,
+        Some(serde_json::json!({ "email": "erin@example.com", "password": "nope" })),
+        &[("X-Device-Id", "dev-erin")],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body, serde_json::json!({ "error": "invalid code" }));
+}
+
+#[tokio::test]
+async fn login_rejects_right_password_with_wrong_email() {
+    let state = test_state(test_config("login-email-cross"));
+    seed_user(&state, "frank@example.com", "code-frank-123");
+
+    let app = routes::router(state);
+    let (status, _, _) = request_with_headers(
+        app,
+        "POST",
+        "/api/auth",
+        None,
+        Some(serde_json::json!({ "email": "other@example.com", "password": "code-frank-123" })),
+        &[("X-Device-Id", "dev-frank")],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn passwordless_account_needs_only_email() {
+    let state = test_state(test_config("login-empty-pw"));
+    {
+        let conn = state.db.lock().unwrap();
+        sync_server::users::add_user(&conn, "free@example.com", Some(String::new())).unwrap();
+        sync_server::users::ensure_user(&conn, "guard@example.com", "code-guard-123").unwrap();
+        // Startup-warning source lists exactly the passwordless accounts.
+        assert_eq!(
+            sync_server::users::empty_password_emails(&conn).unwrap(),
+            vec!["free@example.com".to_string()]
+        );
+    }
+
+    // Empty password logs into the passwordless account…
+    let app = routes::router(state.clone());
+    let (status, body, _) = request_with_headers(
+        app,
+        "POST",
+        "/api/auth",
+        None,
+        Some(serde_json::json!({ "email": "free@example.com", "password": "" })),
+        &[("X-Device-Id", "dev-free")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let token = body["access_token"].as_str().expect("access_token");
+    let claims = sync_server::jwt::verify("test-secret-0123456789abcdef", token).unwrap();
+    assert_eq!(claims.email.as_deref(), Some("free@example.com"));
+
+    // …but never into an account that has a real password.
+    let app = routes::router(state);
+    let (status, _, _) = request_with_headers(
+        app,
+        "POST",
+        "/api/auth",
+        None,
+        Some(serde_json::json!({ "email": "guard@example.com", "password": "" })),
+        &[("X-Device-Id", "dev-guard")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
 // ── sync (T6) ─────────────────────────────────────────────────────────────
 
 const SECRET: &str = "test-secret-0123456789abcdef";

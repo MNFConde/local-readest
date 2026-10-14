@@ -76,7 +76,12 @@ impl FromRequestParts<SharedState> for ClientIp {
     }
 }
 
-/// POST /api/auth — body `{"code": "..."}`, header `X-Device-Id`.
+/// POST /api/auth — body `{"email": "...", "password": "..."}` (the account +
+/// password model); header `X-Device-Id`.
+///
+/// Back-compat: `{"code": "..."}` from pre-password clients is accepted as an
+/// email-less password (the code *is* the password — same column pair), so old
+/// clients keep logging in without migration.
 ///
 /// Responses are written verbatim from the contract (the login endpoint's
 /// 400/401 bodies have no `code` field — keep it that way).
@@ -104,20 +109,37 @@ pub async fn login(
     }
 
     let parsed: Result<serde_json::Value, _> = serde_json::from_slice(&body);
-    let code = parsed
-        .ok()
-        .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string));
-    let Some(code) = code else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "bad request" })),
-        )
-            .into_response();
+    let creds = parsed.ok();
+    let email = creds
+        .as_ref()
+        .and_then(|v| v.get("email"))
+        .and_then(|e| e.as_str())
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(str::to_string);
+    // `code` is the legacy spelling of `password` (pre-password clients).
+    let secret = creds
+        .as_ref()
+        .and_then(|v| v.get("password").or_else(|| v.get("code")))
+        .and_then(|c| c.as_str())
+        .map(str::to_string);
+    let verified = match (email, secret) {
+        (Some(email), Some(secret)) => crate::routes::with_db(&state, |conn| {
+            users::verify_login_email(conn, &email, &secret).map_err(crate::error::ApiError::server)
+        }),
+        // Legacy {code} / {password} without an email: the secret alone
+        // identifies the user.
+        (None, Some(secret)) => crate::routes::with_db(&state, |conn| {
+            users::verify_login(conn, &secret).map_err(crate::error::ApiError::server)
+        }),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "bad request" })),
+            )
+                .into_response()
+        }
     };
-
-    let verified = crate::routes::with_db(&state, |conn| {
-        users::verify_login(conn, &code).map_err(crate::error::ApiError::server)
-    });
     match verified {
         Ok(Some(user)) => {
             state

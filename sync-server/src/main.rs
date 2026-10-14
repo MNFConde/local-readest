@@ -24,8 +24,14 @@ fn main() -> anyhow::Result<()> {
             let (email, code) = parse_add_user_args(&args)?;
             account_op(|conn| {
                 let created = users::add_user(conn, &email, code)?;
-                println!("created {}\nlogin code: {}", created.email, created.code);
-                println!("store it now — it is not recoverable later");
+                if created.code.is_empty() {
+                    println!("created {}", created.email);
+                    println!("password is EMPTY — anyone knowing the email can log in");
+                } else {
+                    println!("created {}", created.email);
+                    println!("password: {}", created.code);
+                    println!("store it now — it is not recoverable later");
+                }
                 Ok(())
             })
         }
@@ -53,15 +59,15 @@ fn main() -> anyhow::Result<()> {
         Some("passwd") => {
             let email = args
                 .get(1)
-                .ok_or_else(|| anyhow::anyhow!("usage: passwd <email> [--code <new-code>]"))?;
-            let code = args
-                .iter()
-                .position(|a| a == "--code")
-                .and_then(|i| args.get(i + 1))
-                .cloned();
-            account_op(|conn| match users::reset_code(conn, email, code)? {
+                .ok_or_else(|| anyhow::anyhow!("usage: passwd <email> [--password <new-password>]"))?;
+            let secret = secret_flag(&args);
+            account_op(|conn| match users::reset_code(conn, email, secret)? {
+                Some(code) if code.is_empty() => {
+                    println!("password for {email} cleared — login now needs only the email");
+                    Ok(())
+                }
                 Some(code) => {
-                    println!("new login code for {email}: {code}");
+                    println!("new password for {email}: {code}");
                     Ok(())
                 }
                 None => {
@@ -72,10 +78,24 @@ fn main() -> anyhow::Result<()> {
         }
         Some(other) => {
             eprintln!(
-                "unknown subcommand: {other}\nusage: sync-server [serve | add-user <email> [--code X] | list-users | disable-user <email> | enable-user <email> | passwd <email> [--code X]]"
+                "unknown subcommand: {other}\nusage: sync-server [serve | add-user <email> [--password X] | list-users | disable-user <email> | enable-user <email> | passwd <email> [--password X]]"
             );
             std::process::exit(2);
         }
+    }
+}
+
+/// Value of `--password X` (preferred) or the legacy `--code X`. `None` means
+/// the flag is absent (caller generates a random secret); an empty value is
+/// meaningful — it creates/clears a passwordless account. A flag at the end of
+/// the line or followed by another flag counts as an explicit empty value.
+fn secret_flag(args: &[String]) -> Option<String> {
+    let pos = args
+        .iter()
+        .position(|a| a == "--password" || a == "--code")?;
+    match args.get(pos + 1) {
+        Some(v) if !v.starts_with("--") => Some(v.clone()),
+        _ => Some(String::new()),
     }
 }
 
@@ -83,13 +103,8 @@ fn parse_add_user_args(args: &[String]) -> anyhow::Result<(String, Option<String
     let email = args
         .get(1)
         .filter(|a| !a.starts_with("--"))
-        .ok_or_else(|| anyhow::anyhow!("usage: add-user <email> [--code X]"))?;
-    let code = args
-        .iter()
-        .position(|a| a == "--code")
-        .and_then(|i| args.get(i + 1))
-        .cloned();
-    Ok((email.clone(), code))
+        .ok_or_else(|| anyhow::anyhow!("usage: add-user <email> [--password X]"))?;
+    Ok((email.clone(), secret_flag(args)))
 }
 
 /// Account commands share the server's env/DB but never need JWT_SECRET.
@@ -109,6 +124,9 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         tracing::info!("blob gc: removed {removed} orphaned content-addressed blob(s)");
     }
     let conn = db::open_db(&cfg)?;
+    for email in users::empty_password_emails(&conn)? {
+        tracing::warn!("account {email} has an EMPTY password — anyone knowing the email can log in");
+    }
     let state: db::SharedState = Arc::new(db::AppState {
         db: conn.into(),
         cfg,
@@ -132,4 +150,26 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("shutting down");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::secret_flag;
+
+    fn args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn secret_flag_parses_password_and_legacy_code() {
+        assert_eq!(secret_flag(&args(&["add-user", "a@b", "--password", "pw"])), Some("pw".into()));
+        assert_eq!(secret_flag(&args(&["add-user", "a@b", "--code", "legacy"])), Some("legacy".into()));
+        // `--password ""` is an explicit passwordless account, not "absent".
+        assert_eq!(secret_flag(&args(&["add-user", "a@b", "--password", ""])), Some("".into()));
+        // Flag at the end of the line: explicit empty, not random.
+        assert_eq!(secret_flag(&args(&["passwd", "a@b", "--password"])), Some("".into()));
+        assert_eq!(secret_flag(&args(&["passwd", "a@b", "--password", "--json"])), Some("".into()));
+        // No flag at all: caller generates a random secret.
+        assert_eq!(secret_flag(&args(&["add-user", "a@b"])), None);
+    }
 }

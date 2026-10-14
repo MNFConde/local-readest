@@ -11,6 +11,12 @@ use sha2::{Digest, Sha256};
 /// had one shared AUTH_CODE; the client sends `{code}` and nothing else, so
 /// per-user codes give multi-user without touching the client patch).
 ///
+/// Since the account+password model the same column pair holds the password:
+/// existing codes simply work as passwords (no migration), and an *empty*
+/// password (`Some("")` at creation / reset) means the account needs no
+/// secret at all — anyone knowing the email can log in. The server warns
+/// about such accounts at startup (`empty_password_emails`).
+///
 /// Lookup uses a SHA-256 index column (O(1) find; the code is random, so a
 /// fast hash is not the weak link), then verifies against an argon2id hash so
 /// a user-chosen weak code doesn't make offline cracking trivial.
@@ -70,6 +76,8 @@ fn argon2_verify(stored: &str, code: &str) -> bool {
 }
 
 pub fn add_user(conn: &Connection, email: &str, code: Option<String>) -> anyhow::Result<NewUser> {
+    // None generates a random secret; Some("") creates a passwordless account
+    // (login needs only the email — the server warns about these at startup).
     let code = code.unwrap_or_else(random_code);
     let id = random_id();
     let created_at = iso_now();
@@ -124,6 +132,18 @@ pub fn verify_login_email(
     Ok(row.and_then(|(id, email, argon, plan)| {
         argon2_verify(&argon, code).then_some(User { id, email, plan })
     }))
+}
+
+/// Emails of accounts whose password is empty (free login). Surfaced as a
+/// startup warning so an operator never runs a passwordless account unnoticed.
+pub fn empty_password_emails(conn: &Connection) -> anyhow::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT email FROM users WHERE code_sha256 = ?1 AND disabled = 0 ORDER BY created_at",
+    )?;
+    let rows = stmt
+        .query_map(params![code_sha256("")], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 pub fn list_users(conn: &Connection) -> anyhow::Result<Vec<(String, String, bool, String)>> {

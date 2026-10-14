@@ -14,26 +14,54 @@ export interface SelfhostedUser {
 }
 
 const DEVICE_ID_KEY = 'selfhosted_device_id';
-const LOGIN_CODE_KEY = 'selfhosted_login_code';
+const CREDENTIALS_KEY = 'selfhosted_credentials';
+// Pre-password clients persisted the bare secret under this key. Kept as a
+// read-only fallback: an updated client can still refresh a session created
+// by an older one, because the server accepts a password without an email as
+// the legacy code.
+const LEGACY_LOGIN_CODE_KEY = 'selfhosted_login_code';
 
-/**
- * Persist the shared login code so an expired JWT can be refreshed without
- * re-prompting the user. This mirrors the official Supabase path persisting
- * `refresh_token` in localStorage: the code is as sensitive as the token
- * itself, so treat the whole localStorage payload as the credential.
- */
-export function saveLoginCode(code: string): void {
-  if (typeof window === 'undefined') return;
-  if (!code) {
-    localStorage.removeItem(LOGIN_CODE_KEY);
-    return;
-  }
-  localStorage.setItem(LOGIN_CODE_KEY, code);
+export interface SavedCredentials {
+  email: string;
+  password: string;
 }
 
-export function getSavedLoginCode(): string {
-  if (typeof window === 'undefined') return '';
-  return localStorage.getItem(LOGIN_CODE_KEY) ?? '';
+/**
+ * Persist the account credentials so an expired JWT can be refreshed without
+ * re-prompting the user. This mirrors the official Supabase path persisting
+ * `refresh_token` in localStorage: the password is as sensitive as the token
+ * itself, so treat the whole localStorage payload as the credential.
+ */
+export function saveCredentials(email: string, password: string): void {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem(CREDENTIALS_KEY, JSON.stringify({ email, password }));
+}
+
+/** Saved credentials, falling back to the pre-password login-code key. */
+export function getSavedCredentials(): SavedCredentials | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(CREDENTIALS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<SavedCredentials>;
+      if (parsed && typeof parsed.password === 'string') {
+        return {
+          email: typeof parsed.email === 'string' ? parsed.email : '',
+          password: parsed.password,
+        };
+      }
+    }
+  } catch {
+    // Corrupted payload: fall through to the legacy key.
+  }
+  const legacy = localStorage.getItem(LEGACY_LOGIN_CODE_KEY);
+  return legacy ? { email: '', password: legacy } : null;
+}
+
+export function clearCredentials(): void {
+  if (typeof window === 'undefined') return;
+  localStorage.removeItem(CREDENTIALS_KEY);
+  localStorage.removeItem(LEGACY_LOGIN_CODE_KEY);
 }
 
 /**
@@ -64,15 +92,17 @@ export function getDeviceId(): string {
 }
 
 /**
- * Login against a self-hosted Readest sync server using a shared static code.
- * The server validates the code and returns a JWT (`plan: pro`, `sub: owner`).
+ * Login against a self-hosted Readest sync server with an account (email) +
+ * password. A passwordless account (server-side created with an empty
+ * password) signs in with an empty password. The server returns a JWT
+ * (`plan: pro`, `sub: owner`).
  */
 export type SelfhostedLoginErrorReason =
   | 'no-url' // 未配置服务端地址
   | 'network' // 连不上服务端（DNS/连接被拒/超时/CORS）
   | 'server' // 服务端 5xx 内部错误
   | 'locked' // 429 设备被限流锁定
-  | 'invalid-code'; // 服务端明确拒绝：授权码错误
+  | 'invalid-credentials'; // 服务端明确拒绝：账号或密码错误
 
 export class SelfhostedLoginError extends Error {
   reason: SelfhostedLoginErrorReason;
@@ -91,7 +121,10 @@ export class SelfhostedLoginError extends Error {
   }
 }
 
-export async function selfhostedLogin(code: string): Promise<SelfhostedLoginResult> {
+export async function selfhostedLogin(
+  email: string,
+  password: string,
+): Promise<SelfhostedLoginResult> {
   const baseUrl = getSelfhostedBaseUrl();
   if (!baseUrl) {
     throw new SelfhostedLoginError('Self-hosted server URL is not configured', 'no-url');
@@ -107,7 +140,7 @@ export async function selfhostedLogin(code: string): Promise<SelfhostedLoginResu
     res = await fetch(`${baseUrl}/api/auth`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ code }),
+      body: JSON.stringify({ email, password }),
     });
   } catch {
     // Network-level failure: DNS resolution, connection refused, timeout, or a
@@ -142,8 +175,9 @@ export async function selfhostedLogin(code: string): Promise<SelfhostedLoginResu
         { status },
       );
     }
-    // Any other non-2xx (400/401/etc.) means the server rejected the code.
-    throw new SelfhostedLoginError('invalid code', 'invalid-code', { status });
+    // Any other non-2xx (400/401/etc.) means the server rejected the
+    // credentials.
+    throw new SelfhostedLoginError('invalid credentials', 'invalid-credentials', { status });
   }
   // Read the body as text first so a non-JSON response (HTML error page,
   // nginx default page, redirect body, stray prefix/BOM) doesn't surface as a

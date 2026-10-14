@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { useTranslation } from '@/hooks/useTranslation';
 import { SELFHOSTED } from '@/utils/supabase';
-import { selfhostedLogin, jwtToUser, saveLoginCode } from '@/services/selfhostedAuth';
+import { selfhostedLogin, jwtToUser, saveCredentials } from '@/services/selfhostedAuth';
 import type { SelfhostedUser } from '@/services/selfhostedAuth';
 import { getSelfhostedServerUrl, saveSelfhostedServerUrl } from '@/services/selfhostedServerUrl';
 
@@ -94,24 +94,23 @@ export default function EmailPasswordAuth({
     // Read credentials from the form's DOM state: Android/iOS password
     // managers fill WebView inputs without events React state can track.
     const formData = new FormData(event.currentTarget);
-    // In self-hosted mode the shared login code is the only credential and is
-    // entered into the password field; the email field is hidden.
     const password = String(formData.get('password') || '');
-    const email = SELFHOSTED ? '' : String(formData.get('email') || '').trim();
+    const email = String(formData.get('email') || '').trim();
     setError('');
     setMessage('');
     setLoading(true);
     try {
-      // Self-hosted mode: a single shared code is used instead of email/password.
+      // Self-hosted mode: account (email) + password against the user's own
+      // sync server; the password may be empty for passwordless accounts.
       if (SELFHOSTED) {
         try {
           saveSelfhostedServerUrl(serverUrl);
-          const { access_token } = await selfhostedLogin(password);
+          const { access_token } = await selfhostedLogin(email, password);
           const user = jwtToUser(access_token);
           if (!user) throw new Error('invalid token');
-          // Persist the code so an expired JWT can be refreshed without
+          // Persist the credentials so an expired JWT can be refreshed without
           // re-prompting (mirrors Supabase's persisted refresh_token).
-          saveLoginCode(password);
+          saveCredentials(email, password);
           // The caller (`onSelfhostedLogin`) is responsible for logging in AND
           // navigating away (via SPA router.push) so the behavior matches the
           // OAuth path on every platform (Tauri / iOS / Android / Web) without
@@ -152,7 +151,7 @@ export default function EmailPasswordAuth({
               setError(_('Too many failed attempts. This device is temporarily locked.'));
             }
           } else {
-            setError(_('Invalid login code'));
+            setError(_('Incorrect email or password'));
           }
         }
         return;
@@ -217,7 +216,9 @@ export default function EmailPasswordAuth({
           <input
             id='server-url'
             name='server-url'
-            type='url'
+            // type='text' (not 'url') so a schemeless `127.0.0.1:8080` can be
+            // typed freely; normalizeServerUrl adds the http:// on save.
+            type='text'
             inputMode='url'
             value={serverUrl}
             onChange={(e) => setServerUrl(e.target.value)}
@@ -229,28 +230,23 @@ export default function EmailPasswordAuth({
           />
         </div>
       )}
-      {!SELFHOSTED && (
-        <div className='flex flex-col'>
-          <label
-            className='flex select-none items-center justify-between px-1 py-2'
-            htmlFor='email'
-          >
-            <span className='text-sm'>{_('Email address')}</span>
-          </label>
-          <input
-            id='email'
-            name='email'
-            type='email'
-            required
-            defaultValue={defaultEmail}
-            placeholder={_('Your email address')}
-            autoComplete={hasPassword ? 'username' : 'email'}
-            className='input eink-bordered w-full rounded-lg placeholder:text-sm'
-            disabled={loading}
-            onFocus={keepAboveKeyboard}
-          />
-        </div>
-      )}
+      <div className='flex flex-col'>
+        <label className='flex select-none items-center justify-between px-1 py-2' htmlFor='email'>
+          <span className='text-sm'>{_('Email address')}</span>
+        </label>
+        <input
+          id='email'
+          name='email'
+          type='email'
+          required
+          defaultValue={defaultEmail}
+          placeholder={_('Your email address')}
+          autoComplete={hasPassword ? 'username' : 'email'}
+          className='input eink-bordered w-full rounded-lg placeholder:text-sm'
+          disabled={loading}
+          onFocus={keepAboveKeyboard}
+        />
+      </div>
       {hasPassword && (
         <div className='flex flex-col'>
           <label
@@ -258,22 +254,18 @@ export default function EmailPasswordAuth({
             htmlFor='password'
           >
             <span className='text-sm'>
-              {SELFHOSTED
-                ? _('Login code')
-                : view === 'sign_in'
-                  ? _('Your Password')
-                  : _('Create a Password')}
+              {view === 'sign_in' ? _('Your Password') : _('Create a Password')}
             </span>
           </label>
           <input
             id='password'
             name='password'
-            type={SELFHOSTED ? 'text' : 'password'}
-            required
-            placeholder={SELFHOSTED ? _('Your login code') : _('Your password')}
-            autoComplete={
-              SELFHOSTED ? 'off' : view === 'sign_in' ? 'current-password' : 'new-password'
-            }
+            type='password'
+            // Self-hosted accounts may be passwordless (empty password): the
+            // field stays optional there, required for the cloud backend.
+            required={!SELFHOSTED}
+            placeholder={_('Your password')}
+            autoComplete={view === 'sign_in' ? 'current-password' : 'new-password'}
             className='input eink-bordered w-full rounded-lg placeholder:text-sm'
             disabled={loading}
             onFocus={keepAboveKeyboard}

@@ -43,7 +43,7 @@ export default function AuthPanel({
           <h1 className='text-xl font-semibold tracking-tight'>{_('Sign in to Readest')}</h1>
           <p className='text-base-content/70 mt-1.5 text-sm leading-relaxed'>
             {SELFHOSTED
-              ? _('Sign in with your self-hosted sync server login code.')
+              ? _('Sign in with the account and password of your self-hosted sync server.')
               : _('Sync your library, reading progress, and highlights across your devices.')}
           </p>
         </div>

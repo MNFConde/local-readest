@@ -15,7 +15,8 @@ import {
   SelfhostedUser,
   selfhostedLogin,
   jwtToUser,
-  getSavedLoginCode,
+  getSavedCredentials,
+  clearCredentials,
   isTokenExpired,
 } from '@/services/selfhostedAuth';
 import posthog from 'posthog-js';
@@ -123,7 +124,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     localStorage.removeItem('token');
     localStorage.removeItem('user');
     localStorage.removeItem('refresh_token');
-    localStorage.removeItem('selfhosted_login_code');
+    clearCredentials();
     setToken(null);
     setUser(null);
   }, []);
@@ -131,15 +132,15 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const refresh = useCallback(async () => {
     if (!supabase) {
       // Self-hosted mode: the JWT is short-lived. Re-login with the persisted
-      // login code once the current token has expired so the user stays
-      // signed in; if the code is no longer valid the next API call will 401
+      // credentials once the current token has expired so the user stays
+      // signed in; if they are no longer valid the next API call will 401
       // and surface a re-login.
       const storedToken = localStorage.getItem('token');
       if (storedToken && !isTokenExpired(storedToken)) return;
-      const code = getSavedLoginCode();
-      if (!code) return;
+      const credentials = getSavedCredentials();
+      if (!credentials) return;
       try {
-        const { access_token } = await selfhostedLogin(code);
+        const { access_token } = await selfhostedLogin(credentials.email, credentials.password);
         const user = jwtToUser(access_token);
         if (user) login(access_token, user);
       } catch {

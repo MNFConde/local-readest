@@ -63,4 +63,67 @@ describe('selfhosted auth', () => {
     expect(jwtToUser(null)).toBeNull();
     expect(jwtToUser('invalid')).toBeNull();
   });
+
+  it('saveCredentials round-trips (empty password = valid passwordless credential)', async () => {
+    const { saveCredentials, getSavedCredentials, clearCredentials } = await import(
+      '@/services/selfhostedAuth'
+    );
+    saveCredentials('alice@example.com', 'pw');
+    expect(getSavedCredentials()).toEqual({ email: 'alice@example.com', password: 'pw' });
+    saveCredentials('free@example.com', '');
+    expect(getSavedCredentials()).toEqual({ email: 'free@example.com', password: '' });
+    clearCredentials();
+    expect(getSavedCredentials()).toBeNull();
+  });
+
+  it('getSavedCredentials falls back to the legacy login-code key (zero migration)', async () => {
+    const { getSavedCredentials } = await import('@/services/selfhostedAuth');
+    localStorage.setItem('selfhosted_login_code', 'legacy-code');
+    expect(getSavedCredentials()).toEqual({ email: '', password: 'legacy-code' });
+  });
+
+  it('selfhostedLogin posts {email,password} to <base>/api/auth', async () => {
+    localStorage.setItem('selfhosted_server_url', 'http://127.0.0.1:8080');
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      text: async () => JSON.stringify({ access_token: fakeJwt, token_type: 'bearer' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const { selfhostedLogin } = await import('@/services/selfhostedAuth');
+      await selfhostedLogin('alice@example.com', 'pw');
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://127.0.0.1:8080/api/auth',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ email: 'alice@example.com', password: 'pw' }),
+        }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('selfhostedLogin maps a 401 to invalid-credentials', async () => {
+    localStorage.setItem('selfhosted_server_url', 'http://127.0.0.1:8080');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        headers: new Headers(),
+        text: async () => '{"error":"invalid code"}',
+      }),
+    );
+    try {
+      const { selfhostedLogin } = await import('@/services/selfhostedAuth');
+      await expect(selfhostedLogin('alice@example.com', 'bad')).rejects.toMatchObject({
+        reason: 'invalid-credentials',
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
