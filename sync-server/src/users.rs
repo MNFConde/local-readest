@@ -25,6 +25,10 @@ pub struct User {
     pub id: String,
     pub email: String,
     pub plan: String,
+    /// Authorization role: "user" or "admin". Admins get admin-JWT access to
+    /// /api/admin; everyone else is a plain account. Absent in the column for
+    /// pre-role databases — the migration backfills 'user'.
+    pub role: String,
 }
 
 #[derive(Debug)]
@@ -75,20 +79,26 @@ fn argon2_verify(stored: &str, code: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn add_user(conn: &Connection, email: &str, code: Option<String>) -> anyhow::Result<NewUser> {
+pub fn add_user(
+    conn: &Connection,
+    email: &str,
+    code: Option<String>,
+    role: &str,
+) -> anyhow::Result<NewUser> {
     // None generates a random secret; Some("") creates a passwordless account
     // (login needs only the email — the server warns about these at startup).
     let code = code.unwrap_or_else(random_code);
     let id = random_id();
     let created_at = iso_now();
     conn.execute(
-        "INSERT INTO users (id, email, code_sha256, code_argon2, plan, disabled, created_at)
-         VALUES (?1, ?2, ?3, ?4, 'pro', 0, ?5)",
+        "INSERT INTO users (id, email, code_sha256, code_argon2, plan, disabled, role, created_at)
+         VALUES (?1, ?2, ?3, ?4, 'pro', 0, ?5, ?6)",
         params![
             id,
             email,
             code_sha256(&code),
             argon2_hash(&code)?,
+            role,
             created_at
         ],
     )?;
@@ -100,16 +110,29 @@ pub fn add_user(conn: &Connection, email: &str, code: Option<String>) -> anyhow:
 
 /// Look up a user by login code and verify it. Disabled users never match.
 pub fn verify_login(conn: &Connection, code: &str) -> anyhow::Result<Option<User>> {
-    let row: Option<(String, String, String, String)> = conn
+    let row: Option<(String, String, String, String, String)> = conn
         .query_row(
-            "SELECT id, email, code_argon2, plan FROM users
+            "SELECT id, email, code_argon2, plan, role FROM users
              WHERE code_sha256 = ?1 AND disabled = 0",
             params![code_sha256(code)],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                ))
+            },
         )
         .optional()?;
-    Ok(row.and_then(|(id, email, argon, plan)| {
-        argon2_verify(&argon, code).then_some(User { id, email, plan })
+    Ok(row.and_then(|(id, email, argon, plan, role)| {
+        argon2_verify(&argon, code).then_some(User {
+            id,
+            email,
+            plan,
+            role,
+        })
     }))
 }
 
@@ -121,16 +144,29 @@ pub fn verify_login_email(
     email: &str,
     code: &str,
 ) -> anyhow::Result<Option<User>> {
-    let row: Option<(String, String, String, String)> = conn
+    let row: Option<(String, String, String, String, String)> = conn
         .query_row(
-            "SELECT id, email, code_argon2, plan FROM users
+            "SELECT id, email, code_argon2, plan, role FROM users
              WHERE email = ?1 AND code_sha256 = ?2 AND disabled = 0",
             params![email, code_sha256(code)],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                ))
+            },
         )
         .optional()?;
-    Ok(row.and_then(|(id, email, argon, plan)| {
-        argon2_verify(&argon, code).then_some(User { id, email, plan })
+    Ok(row.and_then(|(id, email, argon, plan, role)| {
+        argon2_verify(&argon, code).then_some(User {
+            id,
+            email,
+            plan,
+            role,
+        })
     }))
 }
 
@@ -146,9 +182,13 @@ pub fn empty_password_emails(conn: &Connection) -> anyhow::Result<Vec<String>> {
     Ok(rows)
 }
 
-pub fn list_users(conn: &Connection) -> anyhow::Result<Vec<(String, String, bool, String)>> {
-    let mut stmt =
-        conn.prepare("SELECT email, id, disabled, created_at FROM users ORDER BY created_at")?;
+/// (email, id, disabled, created_at, role)
+pub fn list_users(
+    conn: &Connection,
+) -> anyhow::Result<Vec<(String, String, bool, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT email, id, disabled, created_at, role FROM users ORDER BY created_at",
+    )?;
     let rows = stmt
         .query_map([], |r| {
             Ok((
@@ -156,6 +196,7 @@ pub fn list_users(conn: &Connection) -> anyhow::Result<Vec<(String, String, bool
                 r.get::<_, String>(1)?,
                 r.get::<_, i64>(2)? != 0,
                 r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -166,6 +207,16 @@ pub fn set_disabled(conn: &Connection, email: &str, disabled: bool) -> anyhow::R
     let n = conn.execute(
         "UPDATE users SET disabled = ?2 WHERE email = ?1",
         params![email, disabled as i64],
+    )?;
+    Ok(n > 0)
+}
+
+/// Promote/demote between "admin" and "user". Returns false when the email
+/// is unknown; an invalid role is the caller's (handler's) 400.
+pub fn set_role(conn: &Connection, email: &str, role: &str) -> anyhow::Result<bool> {
+    let n = conn.execute(
+        "UPDATE users SET role = ?2 WHERE email = ?1",
+        params![email, role],
     )?;
     Ok(n > 0)
 }
@@ -194,10 +245,12 @@ fn iso_now() -> String {
 }
 
 /// Pretty-print a user list row for the CLI.
-pub fn format_user_row(row: &(String, String, bool, String)) -> impl fmt::Display {
-    let (email, id, disabled, created) = row;
+pub fn format_user_row(
+    row: &(String, String, bool, String, String),
+) -> impl fmt::Display {
+    let (email, id, disabled, created, role) = row;
     format!(
-        "{email:<32} {id}  {}  created_unix={created}",
+        "{email:<32} {id}  {}  role={role}  created_unix={created}",
         if *disabled { "DISABLED" } else { "active" }
     )
 }
@@ -206,12 +259,12 @@ pub fn format_user_row(row: &(String, String, bool, String)) -> impl fmt::Displa
 #[allow(dead_code)]
 pub fn ensure_user(conn: &Connection, email: &str, code: &str) -> anyhow::Result<()> {
     if verify_login(conn, code)?.is_none() {
-        add_user(conn, email, Some(code.to_string()))?;
+        add_user(conn, email, Some(code.to_string()), "user")?;
     }
     Ok(())
 }
 
 #[allow(dead_code)]
-pub fn user_json(row: &(String, String, bool, String)) -> serde_json::Value {
-    json!({ "email": row.0, "id": row.1, "disabled": row.2, "created_at": row.3 })
+pub fn user_json(row: &(String, String, bool, String, String)) -> serde_json::Value {
+    json!({ "email": row.0, "id": row.1, "disabled": row.2, "created_at": row.3, "role": row.4 })
 }

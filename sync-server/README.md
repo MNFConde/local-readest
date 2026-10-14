@@ -23,21 +23,24 @@ cargo run --release
 默认随主程序启用（cargo feature `library`；`--no-default-features` 可整体关闭，只剩同步）：
 
 - **OPDS 书城** `http://<host>:8080/opds`：客户端「添加目录」填此地址，用户名=邮箱、密码=账号密码。同字节的书全服务端只存一份（内容寻址去重 + 硬链接），任意用户上传即全员可见可下载；`LIBRARY_SHARED=0` 改为仅自己可见。
-- **管理页** `http://<host>:8080/admin`：需先设 `$env:ADMIN_TOKEN = "<至少 8 位>"`（不设则管理接口整体 404）。书目改名/归组到作品/标记译本来源（source_hash）、Open Library 自动归组、孤儿 blob 清理、用户停用启用。
+- **管理页**：两种入口共存——客户端内置管理页（admin 账号登录后访问 `<web客户端>/admin`，web/桌面/安卓通用）与服务端内嵌静态页 `http://<host>:8080/admin`（兜底）。鉴权双轨：admin 用户登录 JWT（首个 admin 用 `add-user --admin` 或 `set-role` 产生），或 `ADMIN_TOKEN`（≥8 位，运维兜底轨，不设不影响 JWT 轨道）。功能：建/删用户、重置密码、角色管理、停用启用、书目改名/归组/删除、Open Library 自动归组、孤儿 blob 清理。
 
 ## 账户管理（T5 起）
 
 登录凭据为「账号（邮箱）+ 密码」；历史上生成的登录码原样当作密码使用，无需迁移。密码允许为空 = 免密登录（知道邮箱即可登入），服务端启动时会对这类账号打警告。
 
 ```
-sync-server add-user <email> [--password <密码，缺省随机生成并打印；空串 = 免密>]
+sync-server add-user <email> [--password <密码，缺省随机生成并打印；空串 = 免密>] [--admin]
+sync-server set-role <email> <admin|user>
 sync-server list-users
 sync-server disable-user <email>
 sync-server passwd <email> [--password <新密码>]     # 缺省随机生成
 ```
 
+`role` 决定能否使用客户端管理页（JWT 携带 role claim）；既有库升级时 `role` 列自动迁移补齐，存量用户均为 `user`。
+
 ## 测试
 
 ```
-cargo test        # 契约测试：内存 SQLite + 真实 router 逐端点断言（37 个，含 library feature）
+cargo test        # 契约测试：内存 SQLite + 真实 router 逐端点断言（40 个，含 library feature 与 admin 用户/书目管理）
 ```

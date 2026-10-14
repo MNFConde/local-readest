@@ -21,16 +21,36 @@ fn main() -> anyhow::Result<()> {
             runtime.block_on(serve(cfg))
         }
         Some("add-user") => {
-            let (email, code) = parse_add_user_args(&args)?;
+            let (email, code, role) = parse_add_user_args(&args)?;
             account_op(|conn| {
-                let created = users::add_user(conn, &email, code)?;
+                let created = users::add_user(conn, &email, code, &role)?;
                 if created.code.is_empty() {
-                    println!("created {}", created.email);
+                    println!("created {} (role={role})", created.email);
                     println!("password is EMPTY — anyone knowing the email can log in");
                 } else {
-                    println!("created {}", created.email);
+                    println!("created {} (role={role})", created.email);
                     println!("password: {}", created.code);
                     println!("store it now — it is not recoverable later");
+                }
+                Ok(())
+            })
+        }
+        Some("set-role") => {
+            let email = args
+                .get(1)
+                .filter(|a| !a.starts_with("--"))
+                .ok_or_else(|| anyhow::anyhow!("usage: set-role <email> <admin|user>"))?;
+            let role = args
+                .get(2)
+                .map(String::as_str)
+                .filter(|r| *r == "admin" || *r == "user")
+                .ok_or_else(|| anyhow::anyhow!("usage: set-role <email> <admin|user>"))?;
+            account_op(|conn| {
+                if users::set_role(conn, email, role)? {
+                    println!("{email} is now role={role}");
+                } else {
+                    eprintln!("no such user: {email}");
+                    std::process::exit(1);
                 }
                 Ok(())
             })
@@ -78,7 +98,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some(other) => {
             eprintln!(
-                "unknown subcommand: {other}\nusage: sync-server [serve | add-user <email> [--password X] | list-users | disable-user <email> | enable-user <email> | passwd <email> [--password X]]"
+                "unknown subcommand: {other}\nusage: sync-server [serve | add-user <email> [--password X] [--admin] | set-role <email> <admin|user> | list-users | disable-user <email> | enable-user <email> | passwd <email> [--password X]]"
             );
             std::process::exit(2);
         }
@@ -99,12 +119,17 @@ fn secret_flag(args: &[String]) -> Option<String> {
     }
 }
 
-fn parse_add_user_args(args: &[String]) -> anyhow::Result<(String, Option<String>)> {
+fn parse_add_user_args(args: &[String]) -> anyhow::Result<(String, Option<String>, String)> {
     let email = args
         .get(1)
         .filter(|a| !a.starts_with("--"))
-        .ok_or_else(|| anyhow::anyhow!("usage: add-user <email> [--password X]"))?;
-    Ok((email.clone(), secret_flag(args)))
+        .ok_or_else(|| anyhow::anyhow!("usage: add-user <email> [--password X] [--admin]"))?;
+    let role = if args.iter().any(|a| a == "--admin") {
+        "admin"
+    } else {
+        "user"
+    };
+    Ok((email.clone(), secret_flag(args), role.to_string()))
 }
 
 /// Account commands share the server's env/DB but never need JWT_SECRET.

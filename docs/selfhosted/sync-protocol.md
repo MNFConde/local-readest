@@ -31,9 +31,9 @@
 
 限速：按 `ip:<host>` 与 `dev:<X-Device-Id>` 双键跟踪**连续**失败；3 次失败锁 15 分钟，1 小时无活动重置计数，成功登录清零。两键任一被锁即拒。
 
-JWT（HS256）claims：`sub`（用户标识 = 数据隔离键）、`plan: "pro"`、`exp`、`iat`。客户端对 JWT 只做**不验签**的 payload 解码（`jwtToUser` 读 `sub`/`email`），服务端是唯一信任边界。
+JWT（HS256）claims：`sub`（用户标识 = 数据隔离键）、`plan: "pro"`、`role`（`"admin"`/`"user"`，管理 API 用；**旧 token 无此 claim 视为 user**，客户端解码仅供 UI 门控，服务端才是授权边界）、`email`（展示用）、`exp`、`iat`。客户端对 JWT 只做**不验签**的 payload 解码（`jwtToUser` 读 `sub`/`email`，`jwtRole` 读 `role`），服务端是唯一信任边界。
 
-**本项目偏离（多用户）**：凭据为每用户独立的「账号（邮箱）+ 密码」。历史沿革：曾是每用户独立登录码（服务端随机生成的高熵码），账号+密码模型落地后原码**原样作为密码**使用，零迁移；`add-user --password ""` 可建免密账号（知道邮箱即可登入，服务端启动时警告）。校验流程：SHA-256(secret) 索引 + email 定位用户 → argon2id 复核（允许自设弱密码）→ 签发 `sub=<user_id>`、`email=<用户邮箱>`、`plan=pro`。**TTL 缩短为 1 小时**：客户端 `AuthContext.refresh` 在过期后用持久化的账号密码静默重登（客户端补丁已实现），无需刷新端点。禁用用户返回 401 `{"error":"invalid code"}`。
+**本项目偏离（多用户）**：凭据为每用户独立的「账号（邮箱）+ 密码」。历史沿革：曾是每用户独立登录码（服务端随机生成的高熵码），账号+密码模型落地后原码**原样作为密码**使用，零迁移；`add-user --password ""` 可建免密账号（知道邮箱即可登入，服务端启动时警告）。校验流程：SHA-256(secret) 索引 + email 定位用户 → argon2id 复核（允许自设弱密码）→ 签发 `sub=<user_id>`、`email=<用户邮箱>`、`plan=pro`、`role=<users.role>`。**TTL 缩短为 1 小时**：客户端 `AuthContext.refresh` 在过期后用持久化的账号密码静默重登（客户端补丁已实现），无需刷新端点。禁用用户返回 401 `{"error":"invalid code"}`。
 
 ### 受保护路由的鉴权失败响应
 
@@ -154,17 +154,23 @@ Edge TTS 依赖微软免费接口（websocket 协议）；Rust 实现可用等�
 
 ### 6.4 管理页 /admin 与 /api/admin/*
 
-鉴权：`Authorization: Bearer <ADMIN_TOKEN>`（env 配置；**未设置时全部 /api/admin 端点 404**，`/admin` 页面仍可渲染）。token 比较为 SHA-256 后定长比较。
+鉴权**双轨**：主轨为 admin 用户登录 JWT（`role: "admin"` claim，客户端管理页 `/admin` 用它）；`ADMIN_TOKEN` env 保留为运维兜底轨（内嵌静态页/脚本）。两者任一通过即可。合法 JWT 但非 admin → 403；无/坏凭据 → 401（**未设 ADMIN_TOKEN 不再整体 404**——admin JWT 轨道始终存在，首个 admin 由 CLI 产生）。token 兜底轨比较为 SHA-256 后定长比较。
 
 | 端点 | 说明 |
 |---|---|
-| `GET /admin` | 单文件管理页（内联 JS，token 存 localStorage） |
+| `GET /admin` | 单文件静态管理页（内联 JS，token 存 localStorage；客户端管理页之外的兜底，作品级精细归组仍在此页） |
 | `GET /api/admin/books` | 书目列表（含 workId/sourceHash/addedBy） |
 | `POST /api/admin/books/<hash>` | 编辑 title/author/language；`workId`（null=拆分不归组）；`sourceHash` 衍生链 |
+| `DELETE /api/admin/books/<hash>` | 删除书目：目录行 + 全部持有者文件副本 + 封面 + 内容 blob 一并移除；hash 须过路径安全校验；未知 hash 404 |
 | `GET /api/admin/works` / `POST /api/admin/works` | 作品列表（含书目数）/ 手工建作品（id=`manual-<hex4>`） |
 | `POST /api/admin/enrich` | 对未归组书目逐本查 Open Library（title+author→work_id）自动归组；逐本容错，返回 `{enriched, failed[]}` |
 | `POST /api/admin/gc` | 触发孤儿 blob GC，返回 `{removed}` |
-| `GET /api/admin/users` / `POST /api/admin/users/<email>/state` | 用户列表 / 停用·启用（建用户与改码仍走 CLI） |
+| `GET /api/admin/users` | 用户列表（含 `role`） |
+| `POST /api/admin/users` | 建用户：`{"email","password"?,"role"?}`——`password` 缺省=随机生成**并在响应里仅此一次**返回，空串=免密；`role` 缺省 `user`；重复邮箱 409 |
+| `DELETE /api/admin/users/<email>` | 删用户：账号 + 其全部同步数据行 + `files/<uid>/` 一并移除；随后清理无持有者的目录行；删自己的账号 400 |
+| `POST /api/admin/users/<email>/password` | 重置密码：`{"password"}`（空串=免密）或缺省=随机生成仅返回一次；未知 404 |
+| `POST /api/admin/users/<email>/role` | 改角色 `{"role":"admin"|"user"}`；改自己 400 |
+| `POST /api/admin/users/<email>/state` | 停用·启用 `{"disabled":bool}` |
 
 ### 6.5 元数据代理补强
 
@@ -180,16 +186,16 @@ Edge TTS 依赖微软免费接口（websocket 协议）；Rust 实现可用等�
 | `QUOTA_BYTES` | 2 GiB（每人） | 存储配额 |
 | `MAX_BODY_BYTES` | 512 MiB | 单请求体上限（axum 默认仅 2 MiB，会拒掉整本书的 blob PUT；注意 blob 体整体进内存， audiobook 等超大文件按需调低/调高） |
 | `LIBRARY_SHARED` | `1` | `0` = OPDS 目录只显示调用者自己的上传 |
-| `ADMIN_TOKEN` | 空 | 空 = /api/admin 全部 404；设了才能用管理页 |
+| `ADMIN_TOKEN` | 空 | 运维兜底轨：设了才能用静态页 + Bearer token 直调 /api/admin；**不设也不影响** admin 用户 JWT 走客户端管理页 |
 | `DEEPL_API_KEY` / `DEEPL_ENDPOINT` | 空 | 空 = mock 回显 |
 | `RUST_LOG` | `info` | tracing |
 
-ywz 的 `AUTH_CODE`/`METADATA_BACKEND`/`METADATA_DSN`/`STORAGE_KIND`/`LOCAL_ROOT`/`S3_*` 不保留；用户与密码管理走 CLI：`sync-server add-user <email> [--password <明文，缺省随机生成并打印；空串 = 免密账号>]`、`list-users`、`disable-user <email>`、`passwd <email> [--password <新密码>]`（`--code` 仍被接受为别名）。库表：`users(id TEXT PK, email TEXT UNIQUE, code_sha256 TEXT, code_argon2 TEXT, plan TEXT DEFAULT 'pro', disabled INTEGER DEFAULT 0, created_at TEXT)`（`code_sha256`/`code_argon2` 列名沿用登录码时代，现承载密码）。
+ywz 的 `AUTH_CODE`/`METADATA_BACKEND`/`METADATA_DSN`/`STORAGE_KIND`/`LOCAL_ROOT`/`S3_*` 不保留；用户与密码管理走 CLI 或 admin API（§6.4）：`sync-server add-user <email> [--password <明文，缺省随机生成并打印；空串 = 免密账号>] [--admin]`、`set-role <email> <admin|user>`、`list-users`、`disable-user <email>`、`passwd <email> [--password <新密码>]`（`--code` 仍被接受为别名）。库表：`users(id TEXT PK, email TEXT UNIQUE, code_sha256 TEXT, code_argon2 TEXT, plan TEXT DEFAULT 'pro', disabled INTEGER DEFAULT 0, role TEXT DEFAULT 'user', created_at TEXT)`（`code_sha256`/`code_argon2` 列名沿用登录码时代，现承载密码；`role` 列对既有库由启动迁移自动补齐）。
 
 ## 8. 客户端依赖的隐含前提（回归清单）
 
 1. 登录后所有 API 走 `getBaseUrl()` + `/api`，blob 相对 URL 由 `toFullUrl` 拼接且**非 http 开头必带 Bearer**。
-2. JWT 过期 → `AuthContext.refresh` 用 localStorage `selfhosted_login_code` 静默重登；服务端绝不能让 `/api/auth` 对同一设备的高频重登触发 429（成功会清零计数，天然满足）。
+2. JWT 过期 → `AuthContext.refresh` 用 localStorage `selfhosted_credentials`（旧 key `selfhosted_login_code` 只读回退）静默重登；服务端绝不能让 `/api/auth` 对同一设备的高频重登触发 429（成功会清零计数，天然满足）。
 3. 书架进度依赖 config→book 的进度搭载；删除依赖 `deleted_at` 双通道传播（books 行级 + notes OR 条件）。
 4. books 拉取游标是 `synced_at`（服务器时钟）；客户端把响应行尾 `synced_at` 转回 ms 作下一轮 `since`。
 5. 副本 HLC 字符串比较即时间序，禁止解析成数值。

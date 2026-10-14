@@ -3,13 +3,17 @@ use serde::{Deserialize, Serialize};
 
 /// Wire contract claims: `sub` is the data-isolation key, `plan: "pro"` is
 /// what the client treats as "all features unlocked". `email` is extra
-/// (display-only for the client's `jwtToUser`).
+/// (display-only for the client's `jwtToUser`). `role` gates the admin API —
+/// absent in tokens issued before the role model, which deserialize as a
+/// plain "user".
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     pub plan: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     pub exp: usize,
     pub iat: usize,
 }
@@ -18,12 +22,19 @@ pub struct Claims {
 /// login code via AuthContext.refresh when `exp` passes (see sync-protocol §1).
 const TOKEN_TTL_SECS: usize = 60 * 60;
 
-pub fn issue(secret: &str, sub: &str, email: Option<&str>, plan: &str) -> anyhow::Result<String> {
+pub fn issue(
+    secret: &str,
+    sub: &str,
+    email: Option<&str>,
+    plan: &str,
+    role: Option<&str>,
+) -> anyhow::Result<String> {
     let now = now_secs();
     let claims = Claims {
         sub: sub.to_string(),
         email: email.map(str::to_string),
         plan: plan.to_string(),
+        role: role.map(str::to_string),
         iat: now,
         exp: now + TOKEN_TTL_SECS,
     };

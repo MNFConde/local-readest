@@ -152,6 +152,7 @@ pub async fn login(
                 &user.id,
                 Some(&user.email),
                 &user.plan,
+                Some(&user.role),
             ) {
                 Ok(token) => (
                     StatusCode::OK,

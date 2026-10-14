@@ -306,7 +306,7 @@ async fn passwordless_account_needs_only_email() {
     let state = test_state(test_config("login-empty-pw"));
     {
         let conn = state.db.lock().unwrap();
-        sync_server::users::add_user(&conn, "free@example.com", Some(String::new())).unwrap();
+        sync_server::users::add_user(&conn, "free@example.com", Some(String::new()), "user").unwrap();
         sync_server::users::ensure_user(&conn, "guard@example.com", "code-guard-123").unwrap();
         // Startup-warning source lists exactly the passwordless accounts.
         assert_eq!(
@@ -350,7 +350,7 @@ async fn passwordless_account_needs_only_email() {
 const SECRET: &str = "test-secret-0123456789abcdef";
 
 fn token_for(state: &SharedState, uid: &str) -> String {
-    sync_server::jwt::issue(&state.cfg.jwt_secret, uid, Some(uid), "pro").unwrap()
+    sync_server::jwt::issue(&state.cfg.jwt_secret, uid, Some(uid), "pro", None).unwrap()
 }
 
 #[tokio::test]
@@ -1407,14 +1407,25 @@ async fn admin_request(
 
 #[cfg(feature = "library")]
 #[tokio::test]
-async fn admin_disabled_without_token_and_auth_enforced() {
-    // No ADMIN_TOKEN: admin API 404s entirely, page still renders.
-    let state = test_state(test_config("admin-off"));
+async fn admin_auth_dual_track_jwt_and_operator_token() {
+    // No ADMIN_TOKEN: strangers get 401 (not the old feature-off 404 — the
+    // admin JWT track exists now), the static page still renders.
+    let cfg = test_config("admin-off");
+    let state = test_state(cfg);
+    {
+        let conn = state.db.lock().unwrap();
+        sync_server::users::add_user(&conn, "root@t.test", Some("root-pw-123".into()), "admin")
+            .unwrap();
+        sync_server::users::add_user(&conn, "plain@t.test", Some("plain-pw-123".into()), "user")
+            .unwrap();
+    }
     let app = routes::router(state.clone());
     let (status, _, _) = admin_request(app.clone(), "GET", "/api/admin/books", None, None).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    let (status, body, headers) =
-        request_raw(app, "GET", "/admin", None, None, &[]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) =
+        admin_request(app.clone(), "GET", "/api/admin/books", Some("garbage"), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, body, headers) = request_raw(app, "GET", "/admin", None, None, &[]).await;
     assert_eq!(status, StatusCode::OK);
     assert!(headers
         .get("content-type")
@@ -1423,7 +1434,26 @@ async fn admin_disabled_without_token_and_auth_enforced() {
         .contains("text/html"));
     assert!(body.len() > 100);
 
-    // With a token: wrong/missing bearer → 401, right bearer → 200.
+    // Real login path carries the role into the JWT…
+    let (status, body) = login_jwt(&state, "root@t.test", "root-pw-123", "dev-root").await;
+    assert_eq!(status, StatusCode::OK);
+    let admin_token = body["access_token"].as_str().unwrap().to_string();
+    let claims = sync_server::jwt::verify("test-secret-0123456789abcdef", &admin_token).unwrap();
+    assert_eq!(claims.role.as_deref(), Some("admin"));
+
+    // …admin JWT → 200, plain user JWT → 403.
+    let app = routes::router(state.clone());
+    let (status, body, _) =
+        admin_request(app.clone(), "GET", "/api/admin/books", Some(&admin_token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["books"], json!([]));
+    let (status, body) = login_jwt(&state, "plain@t.test", "plain-pw-123", "dev-plain").await;
+    assert_eq!(status, StatusCode::OK);
+    let user_token = body["access_token"].as_str().unwrap().to_string();
+    let (status, _, _) = admin_request(app, "GET", "/api/admin/books", Some(&user_token), None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // With a token: wrong/missing bearer → 401, right bearer → 200 (ops track).
     let mut cfg = test_config("admin-on");
     cfg.admin_token = Some("admin-secret-token".into());
     let state = test_state(cfg);
@@ -1437,6 +1467,227 @@ async fn admin_disabled_without_token_and_auth_enforced() {
         admin_request(app, "GET", "/api/admin/books", Some("admin-secret-token"), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["books"], json!([]));
+}
+
+#[cfg(feature = "library")]
+async fn login_jwt(
+    state: &SharedState,
+    email: &str,
+    password: &str,
+    device: &str,
+) -> (StatusCode, Value) {
+    let app = routes::router(state.clone());
+    let (status, body, _) = request_with_headers(
+        app,
+        "POST",
+        "/api/auth",
+        None,
+        Some(json!({ "email": email, "password": password })),
+        &[("X-Device-Id", device)],
+    )
+    .await;
+    (status, body)
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn admin_user_crud_password_reset_and_roles() {
+    let cfg = test_config("admin-crud");
+    let state = test_state(cfg);
+    let uid = seed_user(&state, "boss@t.test", "boss-code-1");
+    let admin_token = sync_server::jwt::issue(
+        &state.cfg.jwt_secret,
+        &uid,
+        Some("boss@t.test"),
+        "pro",
+        Some("admin"),
+    )
+    .unwrap();
+    let app = routes::router(state.clone());
+    let tok = Some(admin_token.as_str());
+
+    // Create: random password generated and returned exactly once.
+    let (status, body, _) = admin_request(
+        app.clone(),
+        "POST",
+        "/api/admin/users",
+        tok,
+        Some(json!({ "email": "new@t.test" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let generated = body["password"].as_str().unwrap().to_string();
+    assert!(!generated.is_empty());
+    assert_eq!(body["role"], "user");
+
+    // The returned password logs in.
+    let (status, _) = login_jwt(&state, "new@t.test", &generated, "dev-new").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Duplicate email and invalid role are rejected.
+    let (status, _, _) = admin_request(
+        app.clone(),
+        "POST",
+        "/api/admin/users",
+        tok,
+        Some(json!({ "email": "new@t.test" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _, _) = admin_request(
+        app.clone(),
+        "POST",
+        "/api/admin/users",
+        tok,
+        Some(json!({ "email": "z@t.test", "role": "superuser" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Reset password: old stops working, new works.
+    let (status, _, _) = admin_request(
+        app.clone(),
+        "POST",
+        "/api/admin/users/new%40t.test/password",
+        tok,
+        Some(json!({ "password": "brand-new-pw" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = login_jwt(&state, "new@t.test", &generated, "dev-new2").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = login_jwt(&state, "new@t.test", "brand-new-pw", "dev-new3").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Role endpoint: promote to admin, reflected in list_users.
+    let (status, body, _) = admin_request(
+        app.clone(),
+        "POST",
+        "/api/admin/users/new%40t.test/role",
+        tok,
+        Some(json!({ "role": "admin" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let (status, body, _) = admin_request(app.clone(), "GET", "/api/admin/users", tok, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let new_user = body["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["email"] == "new@t.test")
+        .unwrap();
+    assert_eq!(new_user["role"], "admin");
+
+    // Self-guards: an admin cannot delete their own account or change own role.
+    let (status, _, _) =
+        admin_request(app.clone(), "DELETE", "/api/admin/users/boss%40t.test", tok, None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = admin_request(
+        app.clone(),
+        "POST",
+        "/api/admin/users/boss%40t.test/role",
+        tok,
+        Some(json!({ "role": "user" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Delete the created user; login dies with the account.
+    let (status, _, _) =
+        admin_request(app.clone(), "DELETE", "/api/admin/users/new%40t.test", tok, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = login_jwt(&state, "new@t.test", "brand-new-pw", "dev-new4").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) =
+        admin_request(app, "DELETE", "/api/admin/users/new%40t.test", tok, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn admin_delete_user_cascades_files_and_catalog() {
+    let cfg = test_config("admin-cascade");
+    let state = test_state(cfg);
+    let uid_a = seed_user(&state, "a@t.test", "code-a-1");
+    let uid_b = seed_user(&state, "b@t.test", "code-b-1");
+    let admin_token = sync_server::jwt::issue(
+        &state.cfg.jwt_secret,
+        "nobody",
+        Some("admin@t.test"),
+        "pro",
+        Some("admin"),
+    )
+    .unwrap();
+    let app = routes::router(state.clone());
+    let tok = Some(admin_token.as_str());
+
+    // Shared content: both users upload the same hash — one catalog row.
+    upload_catalog_book(&state, &uid_a, "hashAAA", "Shared Book").await;
+    upload_catalog_book(&state, &uid_b, "hashAAA", "Shared Book").await;
+    upload_catalog_book(&state, &uid_b, "hashBONLY", "Only B Has It").await;
+    let (status, body, _) = admin_request(app.clone(), "GET", "/api/admin/books", tok, None).await;
+    assert_eq!(body["books"].as_array().unwrap().len(), 2);
+
+    // Deleting A keeps the catalog entry (B still holds a copy).
+    let (status, _, _) =
+        admin_request(app.clone(), "DELETE", "/api/admin/users/a%40t.test", tok, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !state.cfg.files_root().join(&uid_a).exists(),
+        "A's files dir removed"
+    );
+    let (_, body, _) = admin_request(app.clone(), "GET", "/api/admin/books", tok, None).await;
+    assert_eq!(body["books"].as_array().unwrap().len(), 2);
+
+    // Deleting B orphans every remaining copy → both catalog rows drop.
+    let (status, _, _) =
+        admin_request(app.clone(), "DELETE", "/api/admin/users/b%40t.test", tok, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body, _) = admin_request(app, "GET", "/api/admin/books", tok, None).await;
+    assert_eq!(body["books"].as_array().unwrap().len(), 0, "body: {body}");
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn admin_delete_book_removes_catalog_files_and_blob() {
+    let cfg = test_config("admin-delbook");
+    let state = test_state(cfg);
+    let uid = seed_user(&state, "holder@t.test", "code-holder-1");
+    upload_catalog_book(&state, &uid, "hashDEL1", "Doomed Book").await;
+    let admin_token = sync_server::jwt::issue(
+        &state.cfg.jwt_secret,
+        "nobody",
+        Some("admin@t.test"),
+        "pro",
+        Some("admin"),
+    )
+    .unwrap();
+    let app = routes::router(state.clone());
+    let tok = Some(admin_token.as_str());
+
+    // Malformed hash is rejected before any file operation.
+    let (status, _, _) =
+        admin_request(app.clone(), "DELETE", "/api/admin/books/..%2Fetc", tok, None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _, _) =
+        admin_request(app.clone(), "DELETE", "/api/admin/books/hashDEL1", tok, None).await;
+    assert_eq!(status, StatusCode::OK);
+    // Holder copy and blob are gone; catalog no longer lists the book.
+    assert!(!state
+        .cfg
+        .files_root()
+        .join(&uid)
+        .join("Readest/Books/hashDEL1")
+        .exists());
+    assert!(!state.cfg.blobs_root().join("hashDEL1").exists());
+    let (_, body, _) = admin_request(app.clone(), "GET", "/api/admin/books", tok, None).await;
+    assert_eq!(body["books"].as_array().unwrap().len(), 0);
+
+    // Deleting again is a 404.
+    let (status, _, _) = admin_request(app, "DELETE", "/api/admin/books/hashDEL1", tok, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[cfg(feature = "library")]

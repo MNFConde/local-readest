@@ -30,6 +30,7 @@ const SCHEMA: &str = r#"
         code_argon2 TEXT NOT NULL,
         plan TEXT NOT NULL DEFAULT 'pro',
         disabled INTEGER NOT NULL DEFAULT 0,
+        role TEXT NOT NULL DEFAULT 'user',
         created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS books (
@@ -88,6 +89,7 @@ pub fn open_db(cfg: &Config) -> anyhow::Result<Connection> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.busy_timeout(std::time::Duration::from_millis(5000))?;
     conn.execute_batch(SCHEMA)?;
+    run_migrations(&conn)?;
     Ok(conn)
 }
 
@@ -95,5 +97,24 @@ pub fn open_db(cfg: &Config) -> anyhow::Result<Connection> {
 pub fn open_db_in_memory() -> anyhow::Result<Connection> {
     let conn = Connection::open_in_memory()?;
     conn.execute_batch(SCHEMA)?;
+    run_migrations(&conn)?;
     Ok(conn)
+}
+
+/// ALTERs for tables that already exist on disk from before a column was
+/// introduced — `CREATE TABLE IF NOT EXISTS` never touches those. Keep in
+/// sync with SCHEMA.
+fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
+    if !table_has_column(conn, "users", "role")? {
+        conn.execute_batch("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")?;
+    }
+    Ok(())
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> anyhow::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let found = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .any(|name| name.ok().as_deref() == Some(column));
+    Ok(found)
 }

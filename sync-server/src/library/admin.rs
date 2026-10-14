@@ -1,13 +1,21 @@
-//! Minimal admin API + page: catalog maintenance (works grouping, metadata
-//! fixes, source_hash lineage), blob GC, and user enable/disable. Auth is a
-//! single shared bearer token (`ADMIN_TOKEN` env); with the variable unset
-//! the API routes return 404 entirely — the safe default. Account creation
-//! and code resets stay CLI-only.
+//! Admin API + page: user account management (create/delete, password
+//! resets, roles, enable/disable), catalog maintenance (works grouping,
+//! metadata fixes, source_hash lineage, book deletion), and blob GC.
+//!
+//! Auth is dual-track: a logged-in admin user's JWT (role claim `admin`) is
+//! the primary path — this is what the cross-platform client admin page uses —
+//! while the shared `ADMIN_TOKEN` env remains as an operator fallback for the
+//! embedded static page and scripting. Without either, every /api/admin route
+//! answers 401 (403 for a valid non-admin JWT). Account creation used to be
+//! CLI-only; it is available both places now.
+
+use std::collections::HashSet;
+use std::path::{Path as FsPath, PathBuf};
 
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use rusqlite::params;
 use serde_json::{json, Value};
@@ -17,11 +25,14 @@ use crate::db::SharedState;
 pub fn router(state: SharedState) -> Router<SharedState> {
     Router::new()
         .route("/books", get(list_books))
-        .route("/books/{hash}", post(update_book))
+        .route("/books/{hash}", post(update_book).delete(delete_book))
         .route("/works", get(list_works).post(create_work))
         .route("/enrich", post(enrich))
         .route("/gc", post(gc))
-        .route("/users", get(list_users))
+        .route("/users", get(list_users).post(create_user))
+        .route("/users/{email}", delete(delete_user))
+        .route("/users/{email}/password", post(reset_password))
+        .route("/users/{email}/role", post(set_user_role))
         .route("/users/{email}/state", post(set_user_state))
         .with_state(state)
 }
@@ -39,27 +50,48 @@ pub async fn admin_page() -> Response {
 
 // ── auth ────────────────────────────────────────────────────────────────────
 
-async fn require_admin(state: &SharedState, headers: &HeaderMap) -> Result<(), Response> {
-    let Some(expected) = state.cfg.admin_token.as_deref() else {
-        // No token configured: admin surface stays disabled.
-        return Err(StatusCode::NOT_FOUND.into_response());
-    };
-    let presented = headers
+fn bearer_token(headers: &HeaderMap) -> &str {
+    headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
+        .unwrap_or("")
+}
+
+/// Admin JWT or the shared operator token, whichever verifies. 401 without a
+/// usable credential, 403 for a valid JWT whose role is not `admin`.
+async fn require_admin(state: &SharedState, headers: &HeaderMap) -> Result<(), Response> {
+    let presented = bearer_token(headers);
     if presented.is_empty() {
         return Err(StatusCode::UNAUTHORIZED.into_response());
     }
-    // Constant-time-ish comparison via SHA-256 of both sides.
-    use sha2::{Digest, Sha256};
-    let a = Sha256::digest(expected.as_bytes());
-    let b = Sha256::digest(presented.as_bytes());
-    if a.as_slice() != b.as_slice() {
-        return Err(StatusCode::UNAUTHORIZED.into_response());
+    // Track 1: an admin user's own login JWT (the multi-platform admin page).
+    if let Ok(claims) = crate::jwt::verify(&state.cfg.jwt_secret, presented) {
+        if claims.role.as_deref() == Some("admin") {
+            return Ok(());
+        }
+        return Err(StatusCode::FORBIDDEN.into_response());
     }
-    Ok(())
+    // Track 2: the shared operator token (embedded page / scripting). Kept as
+    // an ops fallback; unset ADMIN_TOKEN simply leaves only track 1.
+    if let Some(expected) = state.cfg.admin_token.as_deref() {
+        // Constant-time-ish comparison via SHA-256 of both sides.
+        use sha2::{Digest, Sha256};
+        let a = Sha256::digest(expected.as_bytes());
+        let b = Sha256::digest(presented.as_bytes());
+        if a.as_slice() == b.as_slice() {
+            return Ok(());
+        }
+    }
+    Err(StatusCode::UNAUTHORIZED.into_response())
+}
+
+/// Email of the JWT caller, for the self-guards (never set on the operator
+/// token track). Only called after `require_admin` succeeded.
+fn caller_email(state: &SharedState, headers: &HeaderMap) -> Option<String> {
+    crate::jwt::verify(&state.cfg.jwt_secret, bearer_token(headers))
+        .ok()
+        .and_then(|claims| claims.email)
 }
 
 // ── handlers ────────────────────────────────────────────────────────────────
@@ -271,11 +303,323 @@ async fn list_users(
     let rows = crate::users::list_users(&conn).map_err(|e| super::admin_error(e))?;
     let users: Vec<Value> = rows
         .iter()
-        .map(|(email, id, disabled, created)| {
-            json!({ "email": email, "id": id, "disabled": disabled, "createdAt": created })
+        .map(|(email, id, disabled, created, role)| {
+            json!({
+                "email": email,
+                "id": id,
+                "disabled": disabled,
+                "createdAt": created,
+                "role": role,
+            })
         })
         .collect();
     Ok(Json(json!({ "users": users })).into_response())
+}
+
+// ── user account management ─────────────────────────────────────────────────
+
+/// POST /api/admin/users — create an account. Body:
+/// `{"email": "...", "password": "...", "role": "user"|"admin"}`. Password is
+/// optional: absent means the server generates a random one and returns it
+/// exactly once; an empty string creates a passwordless account (login needs
+/// only the email — the server warns about these at startup).
+async fn create_user(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Response, Response> {
+    require_admin(&state, &headers).await?;
+    let payload: Value =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
+    let email = payload
+        .get("email")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .ok_or_else(|| StatusCode::BAD_REQUEST.into_response())?
+        .to_string();
+    let role = match payload.get("role") {
+        None | Some(Value::Null) => "user".to_string(),
+        Some(Value::String(s)) if s == "admin" || s == "user" => s.clone(),
+        Some(_) => return Err(StatusCode::BAD_REQUEST.into_response()),
+    };
+    let password = match payload.get("password") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(_) => return Err(StatusCode::BAD_REQUEST.into_response()),
+    };
+
+    let conn = state.db.lock().map_err(|_| super::admin_error("db lock poisoned"))?;
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM users WHERE email = ?1",
+            params![email],
+            |r| r.get(0),
+        )
+        .ok();
+    if exists.is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "email already exists" })),
+        )
+            .into_response());
+    }
+    let created = crate::users::add_user(&conn, &email, password, &role)
+        .map_err(|e| super::admin_error(e))?;
+    Ok(Json(json!({
+        "email": created.email,
+        // Returned exactly once; the UI must show it before it can't be recovered.
+        "password": created.code,
+        "role": role,
+    }))
+    .into_response())
+}
+
+/// DELETE /api/admin/users/{email} — remove the account, all of its synced
+/// data rows, and its stored file copies. Catalog entries whose content no
+/// longer has any holder copy are dropped too, so the shared library never
+/// lists a book nobody can download. Deleting your own account is refused.
+async fn delete_user(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(email): Path<String>,
+) -> Result<Response, Response> {
+    require_admin(&state, &headers).await?;
+    if caller_email(&state, &headers).as_deref() == Some(email.as_str()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "cannot delete your own account" })),
+        )
+            .into_response());
+    }
+    let conn = state.db.lock().map_err(|_| super::admin_error("db lock poisoned"))?;
+    let uid: Option<String> = conn
+        .query_row(
+            "SELECT id FROM users WHERE email = ?1",
+            params![email],
+            |r| r.get(0),
+        )
+        .ok();
+    let Some(uid) = uid else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no such user" })),
+        )
+            .into_response());
+    };
+    for table in [
+        "books",
+        "notes",
+        "configs",
+        "stat_books",
+        "stat_pages",
+        "replicas",
+        "replica_keys",
+    ] {
+        conn.execute(
+            &format!("DELETE FROM {table} WHERE user_id = ?1"),
+            params![uid],
+        )
+        .map_err(|e| super::admin_error(e))?;
+    }
+    conn.execute("DELETE FROM users WHERE email = ?1", params![email])
+        .map_err(|e| super::admin_error(e))?;
+    drop(conn);
+
+    // Their uploaded copies are gone with the account; the files/ tree entry
+    // is per-uid, so remove the whole directory.
+    let user_dir = state.cfg.files_root().join(&uid);
+    if user_dir.exists() {
+        let _ = std::fs::remove_dir_all(&user_dir);
+    }
+    drop_catalog_without_holders(&state);
+    Ok(Json(json!({ "deleted": email })).into_response())
+}
+
+/// POST /api/admin/users/{email}/password — body `{"password": "..."}`. An
+/// empty string clears the password (passwordless account). Without a
+/// `password` field a random one is generated and returned exactly once.
+async fn reset_password(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(email): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Response, Response> {
+    require_admin(&state, &headers).await?;
+    let explicit: Option<Option<String>> = if body.is_empty() {
+        None
+    } else {
+        let payload: Value =
+            serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
+        match payload.get("password") {
+            None => None,
+            Some(Value::String(s)) => Some(Some(s.clone())),
+            Some(_) => return Err(StatusCode::BAD_REQUEST.into_response()),
+        }
+    };
+    let had_explicit_password = matches!(explicit, Some(Some(_)));
+    let conn = state.db.lock().map_err(|_| super::admin_error("db lock poisoned"))?;
+    match crate::users::reset_code(&conn, &email, explicit.flatten()) {
+        Ok(Some(code)) => {
+            if had_explicit_password {
+                Ok(Json(json!({ "updated": 1 })).into_response())
+            } else {
+                Ok(Json(json!({ "updated": 1, "password": code })).into_response())
+            }
+        }
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no such user" })),
+        )
+            .into_response()),
+        Err(e) => Err(super::admin_error(e)),
+    }
+}
+
+/// POST /api/admin/users/{email}/role — body `{"role": "admin"|"user"}`.
+/// Changing your own role is refused (demoting the last admin is a footgun;
+/// use the CLI deliberately if ever needed).
+async fn set_user_role(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(email): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Response, Response> {
+    require_admin(&state, &headers).await?;
+    let payload: Value =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
+    let role = payload
+        .get("role")
+        .and_then(Value::as_str)
+        .filter(|r| *r == "admin" || *r == "user")
+        .ok_or_else(|| StatusCode::BAD_REQUEST.into_response())?;
+    if caller_email(&state, &headers).as_deref() == Some(email.as_str()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "cannot change your own role" })),
+        )
+            .into_response());
+    }
+    let conn = state.db.lock().map_err(|_| super::admin_error("db lock poisoned"))?;
+    match crate::users::set_role(&conn, &email, role) {
+        Ok(true) => Ok(Json(json!({ "updated": 1, "role": role })).into_response()),
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no such user" })),
+        )
+            .into_response()),
+        Err(e) => Err(super::admin_error(e)),
+    }
+}
+
+// ── book deletion + catalog/file helpers ────────────────────────────────────
+
+/// The hash ends up joined onto file paths, so reject anything that could
+/// traverse or smuggle separators. Real content hashes are 64-char hex, but
+/// older entries may carry other shapes — stay permissive beyond traversal.
+fn is_safe_hash(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && !s.contains('/')
+        && !s.contains('\\')
+        && !s.contains("..")
+        && s.chars().all(|c| c.is_ascii_graphic())
+}
+
+/// Every stored file: (key relative to files_root, full path).
+fn collect_files(dir: &FsPath, rel: &mut String, out: &mut Vec<(String, PathBuf)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let pushed = rel.len();
+        if !rel.is_empty() {
+            rel.push('/');
+        }
+        rel.push_str(name);
+        if is_dir {
+            collect_files(&entry.path(), rel, out);
+        } else {
+            out.push((rel.clone(), entry.path()));
+        }
+        rel.truncate(pushed);
+    }
+}
+
+/// Catalog rows whose content no longer has a single stored copy anywhere.
+/// Any file under `Readest/Books/<hash>/` (covers included) counts as held.
+fn drop_catalog_without_holders(state: &SharedState) {
+    let mut files = Vec::new();
+    collect_files(&state.cfg.files_root(), &mut String::new(), &mut files);
+    let held: HashSet<String> = files
+        .iter()
+        .filter_map(|(key, _)| crate::storage::book_hash_from_key(key))
+        .collect();
+    let Ok(conn) = state.db.lock() else {
+        return;
+    };
+    let catalog: Vec<String> = {
+        let mut stmt = match conn.prepare("SELECT hash FROM catalog_books") {
+            Ok(stmt) => stmt,
+            Err(_) => return,
+        };
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    };
+    for hash in catalog {
+        if !held.contains(&hash) {
+            let _ = conn.execute("DELETE FROM catalog_books WHERE hash = ?1", params![hash]);
+        }
+    }
+}
+
+/// DELETE /api/admin/books/{hash} — remove the catalog entry, every stored
+/// copy (files and the content blob), and its covers. Per-user library rows
+/// are the clients' own synced data and stay; a user who still holds the
+/// book locally can re-share it by re-uploading.
+async fn delete_book(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(hash): Path<String>,
+) -> Result<Response, Response> {
+    require_admin(&state, &headers).await?;
+    if !is_safe_hash(&hash) {
+        return Err(StatusCode::BAD_REQUEST.into_response());
+    }
+    let conn = state.db.lock().map_err(|_| super::admin_error("db lock poisoned"))?;
+    let n = conn
+        .execute(
+            "DELETE FROM catalog_books WHERE hash = ?1",
+            params![hash],
+        )
+        .map_err(|e| super::admin_error(e))?;
+    drop(conn);
+    if n == 0 {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no such book" })),
+        )
+            .into_response());
+    }
+
+    let mut files = Vec::new();
+    collect_files(&state.cfg.files_root(), &mut String::new(), &mut files);
+    for (key, path) in files {
+        if crate::storage::book_hash_from_key(&key).as_deref() == Some(hash.as_str()) {
+            // remove_file only unlinks one directory entry; hard-linked
+            // siblings and the blob are untouched (never fs::write!).
+            let _ = std::fs::remove_file(&path);
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::remove_dir(parent); // prune Books/<hash>/ when empty
+            }
+        }
+    }
+    let _ = std::fs::remove_file(state.cfg.blobs_root().join(&hash));
+    Ok(Json(json!({ "deleted": 1 })).into_response())
 }
 
 async fn set_user_state(
