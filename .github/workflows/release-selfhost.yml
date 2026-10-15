@@ -8,6 +8,8 @@ name: Release Selfhost
 #     APK is a superset, so a per-ABI rebuild (~40min) would be redundant
 #   - sync-server static/portable binaries (linux musl x86_64+aarch64,
 #     macOS arm64+x86_64, Windows x86_64)
+#   - self-host server bundle for Windows (sync-server.exe + web reader
+#     standalone server + start.bat — the no-Docker one-command deployment)
 # Desktop updater artifacts and latest.json are produced by tauri-action
 # (createUpdaterArtifacts: true in tauri.conf.json); the Android job runs
 # after the desktop job and merges its entries into that same latest.json.
@@ -319,3 +321,71 @@ jobs:
             tar czf "${artifact}.tar.gz" -C "$bin_dir" sync-server
             gh release upload "$tag" "${artifact}.tar.gz" --clobber
           fi
+
+  build-server-bundle:
+    # The no-Docker self-host deployment: one Windows zip with the sync-server
+    # binary AND the web reader standalone server, brought up by start.bat.
+    # Uses the same script as a local bundle build, so what CI ships is what
+    # the smoke test ran.
+    needs: create-release
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: setup node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: install dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: copy pdfjs-dist and simplecc-dist to public directory
+        run: pnpm --filter @readest/readest-app setup-vendors
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          workspaces: sync-server
+          key: selfhost-server-bundle-x86_64-pc-windows-msvc
+
+      - name: build web standalone
+        # BUILD_STANDALONE opts into the self-contained `.next/standalone`
+        # tree (next.config.mjs; the Docker image sets the same flag).
+        # NEXT_PUBLIC_SELFHOSTED is a compile-time flag that swaps Supabase
+        # for the self-hosted login — see the desktop job for the full note.
+        working-directory: apps/readest-app
+        run: |
+          export BUILD_STANDALONE=true
+          export NEXT_PUBLIC_SELFHOSTED=1
+          pnpm build-web
+
+      - name: build sync server
+        working-directory: sync-server
+        run: cargo build --release
+
+      - name: package bundle
+        run: node scripts/selfhost/package-server-bundle.mjs --zip
+
+      - name: upload bundle to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag=${{ needs.create-release.outputs.tag }}
+          gh release upload "$tag" build/readest-selfhost-server_*.zip --clobber
