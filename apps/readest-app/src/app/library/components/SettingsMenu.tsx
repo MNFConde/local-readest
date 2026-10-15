@@ -36,6 +36,7 @@ import { selectDirectory } from '@/utils/bridge';
 import { nextThemeMode } from '@/utils/ambientLight';
 import UserAvatar from '@/components/UserAvatar';
 import MenuItem from '@/components/MenuItem';
+import AdminConsoleMenuItem from '@/admin/AdminConsoleMenuItem';
 import Quota from '@/components/Quota';
 import Menu from '@/components/Menu';
 import { type AppLockDialogMode, useAppLockStore } from '@/store/appLockStore';
@@ -414,6 +415,8 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({ onPullLibrary, setIsDropdow
         onClick={cycleThemeMode}
       />
       <MenuItem label={_('Settings')} Icon={PiGear} onClick={openSettingsDialog} />
+      {/* Self-hosted only (renders null otherwise): admin-role entry into /admin. */}
+      <AdminConsoleMenuItem onNavigated={() => setIsDropdownOpen?.(false)} />
       <hr aria-hidden='true' className='border-base-200 my-1' />
       <MenuItem label={_('Advanced Settings')}>
         <ul className='ms-0 flex flex-col ps-0 before:hidden'>
