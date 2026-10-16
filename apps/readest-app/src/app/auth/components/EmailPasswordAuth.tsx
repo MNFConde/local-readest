@@ -1,19 +1,19 @@
 import { useEffect, useState } from 'react';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { useTranslation } from '@/hooks/useTranslation';
+// SELFHOSTED (fork): self-hosted builds replace the Supabase flow below with
+// the fork-owned form; everything else in this file stays upstream text.
 import { SELFHOSTED } from '@/utils/supabase';
-import { selfhostedLogin, jwtToUser, saveCredentials } from '@/services/selfhostedAuth';
+import SelfhostedAuthForm from '@/libs/selfhost/SelfhostedAuthForm';
 import type { SelfhostedUser } from '@/services/selfhostedAuth';
-import { getSelfhostedServerUrl, saveSelfhostedServerUrl } from '@/services/selfhostedServerUrl';
 
 type AuthView = 'sign_in' | 'sign_up' | 'magic_link' | 'forgotten_password';
 
 interface EmailPasswordAuthProps {
-  supabaseClient: SupabaseClient | null;
+  supabaseClient: SupabaseClient | null; // SELFHOSTED (fork): null when self-hosted
   redirectTo?: string;
   magicLink?: boolean;
-  // Self-hosted mode: called with the JWT issued by the sync server.
-  onSelfhostedLogin?: (accessToken: string, user: SelfhostedUser) => void;
+  onSelfhostedLogin?: (accessToken: string, user: SelfhostedUser) => void; // SELFHOSTED (fork)
 }
 
 const FORM_IDS: Record<AuthView, string> = {
@@ -32,16 +32,13 @@ export default function EmailPasswordAuth({
   magicLink = false,
   onSelfhostedLogin,
 }: EmailPasswordAuthProps) {
-  const _ = useTranslation('selfhost');
+  const _ = useTranslation();
   const [view, setView] = useState<AuthView>('sign_in');
   const [defaultEmail, setDefaultEmail] = useState('');
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [keyboardInset, setKeyboardInset] = useState(0);
-  // Self-hosted mode: server address entered at runtime (persisted) instead of
-  // baked in at build time, so a shared installer works for any user.
-  const [serverUrl, setServerUrl] = useState(() => getSelfhostedServerUrl());
 
   const hasPassword = view === 'sign_in' || view === 'sign_up';
 
@@ -61,6 +58,9 @@ export default function EmailPasswordAuth({
       vv.removeEventListener('scroll', update);
     };
   }, []);
+
+  // SELFHOSTED (fork): the self-hosted sign-in flow owns the form entirely.
+  if (SELFHOSTED) return <SelfhostedAuthForm onSelfhostedLogin={onSelfhostedLogin} />;
 
   // The Android WebView does not resize with the keyboard, and Chromium
   // resets the visual-viewport pan when the IME advances focus (keyboard
@@ -94,68 +94,13 @@ export default function EmailPasswordAuth({
     // Read credentials from the form's DOM state: Android/iOS password
     // managers fill WebView inputs without events React state can track.
     const formData = new FormData(event.currentTarget);
-    const password = String(formData.get('password') || '');
     const email = String(formData.get('email') || '').trim();
+    const password = String(formData.get('password') || '');
     setError('');
     setMessage('');
     setLoading(true);
     try {
-      // Self-hosted mode: account (email) + password against the user's own
-      // sync server; the password may be empty for passwordless accounts.
-      if (SELFHOSTED) {
-        try {
-          saveSelfhostedServerUrl(serverUrl);
-          const { access_token } = await selfhostedLogin(email, password);
-          const user = jwtToUser(access_token);
-          if (!user) throw new Error('invalid token');
-          // Persist the credentials so an expired JWT can be refreshed without
-          // re-prompting (mirrors Supabase's persisted refresh_token).
-          saveCredentials(email, password);
-          // The caller (`onSelfhostedLogin`) is responsible for logging in AND
-          // navigating away (via SPA router.push) so the behavior matches the
-          // OAuth path on every platform (Tauri / iOS / Android / Web) without
-          // triggering a full WebView reload.
-          onSelfhostedLogin?.(access_token, user);
-        } catch (e) {
-          const err = e as Error & {
-            status?: number;
-            lockedUntil?: number;
-            reason?: string;
-          };
-          if (err.reason === 'network') {
-            // 连不上服务端：URL 没配对 / 服务端没启动 / 防火墙 / CORS
-            setError(
-              _(
-                'Cannot connect to the sync server. Check that the server is running and the server address is correctly configured in the app.',
-              ),
-            );
-          } else if (err.reason === 'no-url') {
-            setError(_('Please enter your sync server address above before signing in.'));
-          } else if (err.reason === 'server') {
-            setError(
-              _(
-                'The sync server encountered an internal error. Please check the server logs and try again later.',
-              ),
-            );
-          } else if (err.reason === 'locked' || err.status === 429) {
-            // 兜底：旧版本错误可能没有 reason 字段，仍按 429 处理
-            if (err.lockedUntil) {
-              const mins = Math.max(1, Math.ceil((err.lockedUntil - Date.now()) / 60000));
-              setError(
-                _(
-                  'Too many failed attempts. This device is locked. Try again in {{minutes}} min.',
-                  { minutes: mins },
-                ),
-              );
-            } else {
-              setError(_('Too many failed attempts. This device is temporarily locked.'));
-            }
-          } else {
-            setError(_('Incorrect email or password'));
-          }
-        }
-        return;
-      }
+      // SELFHOSTED (fork): the client is nullable; unreachable when self-hosted.
       if (!supabaseClient) throw new Error('No backend connected');
       if (view === 'sign_in') {
         const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
@@ -191,7 +136,7 @@ export default function EmailPasswordAuth({
   const buttonLabel = {
     sign_in: loading ? _('Signing in...') : _('Sign in'),
     sign_up: loading ? _('Signing up...') : _('Sign up'),
-    magic_link: loading ? _('Signing in...') : _('Sign in'),
+    magic_link: loading ? _('Signing in ...') : _('Sign in'),
     forgotten_password: loading
       ? _('Sending reset instructions ...')
       : _('Send reset password instructions'),
@@ -205,31 +150,6 @@ export default function EmailPasswordAuth({
       onSubmit={handleSubmit}
       className='w-full space-y-4'
     >
-      {SELFHOSTED && (
-        <div className='flex flex-col'>
-          <label
-            className='flex select-none items-center justify-between px-1 py-2'
-            htmlFor='server-url'
-          >
-            <span className='text-sm'>{_('Sync server address')}</span>
-          </label>
-          <input
-            id='server-url'
-            name='server-url'
-            // type='text' (not 'url') so a schemeless `127.0.0.1:8080` can be
-            // typed freely; normalizeServerUrl adds the http:// on save.
-            type='text'
-            inputMode='url'
-            value={serverUrl}
-            onChange={(e) => setServerUrl(e.target.value)}
-            placeholder={_('https://sync.your-server.com')}
-            autoComplete='url'
-            className='input eink-bordered w-full rounded-lg placeholder:text-sm'
-            disabled={loading}
-            onFocus={keepAboveKeyboard}
-          />
-        </div>
-      )}
       <div className='flex flex-col'>
         <label className='flex select-none items-center justify-between px-1 py-2' htmlFor='email'>
           <span className='text-sm'>{_('Email address')}</span>
@@ -261,9 +181,7 @@ export default function EmailPasswordAuth({
             id='password'
             name='password'
             type='password'
-            // Self-hosted accounts may be passwordless (empty password): the
-            // field stays optional there, required for the cloud backend.
-            required={!SELFHOSTED}
+            required
             placeholder={_('Your password')}
             autoComplete={view === 'sign_in' ? 'current-password' : 'new-password'}
             className='input eink-bordered w-full rounded-lg placeholder:text-sm'
@@ -287,7 +205,7 @@ export default function EmailPasswordAuth({
         </div>
       )}
       <div className='flex flex-col items-center gap-2.5 pt-1 text-sm'>
-        {!SELFHOSTED && view === 'sign_in' && (
+        {view === 'sign_in' && (
           <>
             {magicLink && (
               <button type='button' className={LINK_CLASS} onClick={switchView('magic_link')}>
@@ -302,7 +220,7 @@ export default function EmailPasswordAuth({
             </button>
           </>
         )}
-        {!SELFHOSTED && view !== 'sign_in' && (
+        {view !== 'sign_in' && (
           <button type='button' className={LINK_CLASS} onClick={switchView('sign_in')}>
             {_('Already have an account? Sign in')}
           </button>
