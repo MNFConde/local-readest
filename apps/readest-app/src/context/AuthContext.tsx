@@ -11,13 +11,12 @@ import {
 } from 'react';
 import { User } from '@supabase/supabase-js';
 import { supabase } from '@/utils/supabase';
+// SELFHOSTED (fork): the self-hosted auth backend (types + logout/refresh
+// delegates); the Supabase flow below stays upstream text.
 import {
   SelfhostedUser,
-  selfhostedLogin,
-  jwtToUser,
-  getSavedCredentials,
   clearCredentials,
-  isTokenExpired,
+  refreshSelfhostedSession,
 } from '@/services/selfhostedAuth';
 import posthog from 'posthog-js';
 
@@ -41,12 +40,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [user, setUser] = useState<User | SelfhostedUser | null>(() => {
     if (typeof window !== 'undefined') {
       const userJson = localStorage.getItem('user');
-      try {
-        return userJson ? JSON.parse(userJson) : null;
-      } catch {
-        // Corrupted/legacy `user` payload must not crash the whole provider.
-        return null;
-      }
+      return userJson ? JSON.parse(userJson) : null;
     }
     return null;
   });
@@ -106,8 +100,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     setToken(newToken);
     setUser(newUser);
     localStorage.setItem('token', newToken);
-    localStorage.setItem('user', JSON.stringify(newUser ?? {}));
-    // 自托管模式无 refresh_token 概念；清除任何历史残留，避免混淆
+    localStorage.setItem('user', JSON.stringify(newUser));
+    // SELFHOSTED (fork): no refresh_token concept; clear any legacy residue.
     localStorage.removeItem('refresh_token');
   }, []);
 
@@ -130,24 +124,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   }, []);
 
   const refresh = useCallback(async () => {
-    if (!supabase) {
-      // Self-hosted mode: the JWT is short-lived. Re-login with the persisted
-      // credentials once the current token has expired so the user stays
-      // signed in; if they are no longer valid the next API call will 401
-      // and surface a re-login.
-      const storedToken = localStorage.getItem('token');
-      if (storedToken && !isTokenExpired(storedToken)) return;
-      const credentials = getSavedCredentials();
-      if (!credentials) return;
-      try {
-        const { access_token } = await selfhostedLogin(credentials.email, credentials.password);
-        const user = jwtToUser(access_token);
-        if (user) login(access_token, user);
-      } catch {
-        // Keep the stale token; callers fall back to the login screen on 401.
-      }
-      return;
-    }
+    // SELFHOSTED (fork): silent re-login with persisted credentials.
+    if (!supabase) return refreshSelfhostedSession(login);
     try {
       await supabase.auth.refreshSession();
     } catch {}

@@ -284,3 +284,27 @@ export function isTokenExpired(token: string | null | undefined): boolean {
   if (exp === null) return true;
   return Date.now() >= exp * 1000;
 }
+
+/**
+ * The self-hosted counterpart of Supabase's session refresh, called from
+ * AuthContext when the Supabase client is absent: the JWT is short-lived, so
+ * once the current token has expired, re-login with the persisted
+ * credentials to keep the user signed in. If they are no longer valid the
+ * next API call will 401 and surface a re-login; the stale token is kept
+ * until then (callers fall back to the login screen on 401).
+ */
+export async function refreshSelfhostedSession(
+  login: (token: string, user: SelfhostedUser) => void,
+): Promise<void> {
+  const storedToken = localStorage.getItem('token');
+  if (storedToken && !isTokenExpired(storedToken)) return;
+  const credentials = getSavedCredentials();
+  if (!credentials) return;
+  try {
+    const { access_token } = await selfhostedLogin(credentials.email, credentials.password);
+    const user = jwtToUser(access_token);
+    if (user) login(access_token, user);
+  } catch {
+    // Keep the stale token; callers fall back to the login screen on 401.
+  }
+}

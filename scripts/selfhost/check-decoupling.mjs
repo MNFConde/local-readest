@@ -39,7 +39,7 @@ const BUDGETS = {
   'apps/readest-app/src/i18n/i18n.ts': 8,
   // seam files pending P2 convergence — budgets tighten as each lands
   'apps/readest-app/src/app/auth/components/EmailPasswordAuth.tsx': 16,
-  'apps/readest-app/src/context/AuthContext.tsx': 82,
+  'apps/readest-app/src/context/AuthContext.tsx': 56,
   'apps/readest-app/src/app/library/page.tsx': 16,
   'apps/readest-app/src/services/libraryService.ts': 18,
   'apps/readest-app/src/libs/storage.ts': 72,
