@@ -7,14 +7,17 @@
 
 ## 跟上游循环
 
+客户端改动已直接提交在 `selfhosted` 分支（早已不走 patch 重放），跟上游就是普通 merge：
+
 ```bash
 git checkout main && git fetch official && git merge --ff-only official/main && git push origin main
 git checkout selfhosted && git merge main
-git apply --3way docs/selfhosted/readest-client-selfhost.patch   # 解 6+ 文件冲突
-# 跑 sync-server 契约测试 + web 构建，通过后 commit
+# pnpm-lock.yaml 冲突：先 `git checkout --theirs pnpm-lock.yaml` 再 `pnpm install` 重新生成
+# 冲突解法会被 rerere 记录，下次同型冲突自动复用（新机器先 `git config rerere.enabled true`）
+cd apps/readest-app && pnpm install && pnpm lint && pnpm test   # 冒烟闸，通过后 commit
 ```
 
-`git apply --3way` 需要 pre-image blob：本仓库已 `git remote add official https://github.com/readest/readest.git && git fetch official main`，官方全量历史在库即可。
+冲突预期集中在共享文件的 SELFHOSTED 接缝行与 `package.json`/CI 等小文件；历史背景：早期版本走 `git apply --3way docs/selfhosted/readest-client-selfhost.patch` 重放，该流程已废弃。
 
 ## 补丁内容（甄选自 ywz626/readest-selfhosted）
 
