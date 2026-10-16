@@ -43,7 +43,7 @@ const BUDGETS = {
   'apps/readest-app/src/app/library/page.tsx': 16,
   'apps/readest-app/src/services/libraryService.ts': 18,
   'apps/readest-app/src/libs/storage.ts': 40,
-  'apps/readest-app/src/helpers/auth.ts': 26,
+  'apps/readest-app/src/helpers/auth.ts': 20,
   // build/CI/config — small, stable
   'apps/readest-app/package.json': 12,
   'package.json': 6,

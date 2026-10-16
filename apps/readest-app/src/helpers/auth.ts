@@ -1,6 +1,7 @@
 import { User } from '@supabase/supabase-js';
 import { supabase, SELFHOSTED } from '@/utils/supabase';
-import { jwtToUser, SelfhostedUser } from '@/services/selfhostedAuth';
+// SELFHOSTED (fork): the self-hosted callback delegate (see below).
+import { handleSelfhostedAuthCallback, SelfhostedUser } from '@/services/selfhostedAuth';
 
 interface UseAuthCallbackOptions {
   accessToken?: string | null;
@@ -61,18 +62,10 @@ export function handleAuthCallback({
       return;
     }
 
-    // Self-hosted mode: the token is a JWT issued by the sync server. There is
-    // no Supabase session to set; derive the user from the JWT `sub` claim and
-    // log in directly. OAuth flows are not used in self-hosted mode.
+    // SELFHOSTED (fork): no Supabase session — the fork-owned delegate
+    // derives the user from the JWT and logs in directly.
     if (SELFHOSTED) {
-      const user = jwtToUser(accessToken);
-      if (!user) {
-        console.error('Error deriving user from self-hosted token');
-        navigate('/auth/error');
-        return;
-      }
-      login(accessToken, user);
-      navigate(next);
+      handleSelfhostedAuthCallback({ accessToken, login, navigate, next });
       return;
     }
 

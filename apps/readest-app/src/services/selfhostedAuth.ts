@@ -286,6 +286,34 @@ export function isTokenExpired(token: string | null | undefined): boolean {
 }
 
 /**
+ * Handle an auth callback in self-hosted mode, called from
+ * helpers/auth.ts#handleAuthCallback: the token is a JWT issued by the sync
+ * server. There is no Supabase session to set; derive the user from the JWT
+ * `sub` claim and log in directly. OAuth flows are not used in self-hosted
+ * mode.
+ */
+export function handleSelfhostedAuthCallback({
+  accessToken,
+  login,
+  navigate,
+  next,
+}: {
+  accessToken: string;
+  login: (token: string, user: SelfhostedUser) => void;
+  navigate: (path: string) => void;
+  next: string;
+}): void {
+  const user = jwtToUser(accessToken);
+  if (!user) {
+    console.error('Error deriving user from self-hosted token');
+    navigate('/auth/error');
+    return;
+  }
+  login(accessToken, user);
+  navigate(next);
+}
+
+/**
  * The self-hosted counterpart of Supabase's session refresh, called from
  * AuthContext when the Supabase client is absent: the JWT is short-lived, so
  * once the current token has expired, re-login with the persisted
