@@ -26,8 +26,11 @@ export const getBookDirOfPath = (path: string) => {
   const slashIdx = normalized.indexOf('/');
   return slashIdx < 0 ? undefined : normalized.slice(0, slashIdx);
 };
-export const getLibraryFilename = () => {
-  return 'library.json';
+// SELFHOSTED (fork): each account reads and writes its own
+// `library_<uid>.json`; guests and every non-self-hosted build keep the
+// shared device-wide `library.json`.
+export const getLibraryFilename = (userId?: string | null) => {
+  return userId ? `library_${userId}.json` : 'library.json';
 };
 export const getLibraryBackupFilename = () => {
   return 'library_backup.json';

@@ -23,6 +23,8 @@ import { getLibraryFilename, getLibraryBackupFilename } from '@/utils/book';
 import { getDirPath, getFilename } from '@/utils/path';
 
 import { getOSPlatform } from '@/utils/misc';
+import { getUserID } from '@/utils/access';
+import { SELFHOSTED } from '@/utils/supabase';
 import { buildAbsEbookUrl, isAbsEbook, parseAbsFilePath } from '@/utils/audiobook';
 import { isStoragePermissionError, requestStoragePermission } from '@/utils/permission';
 import { ProgressHandler } from '@/utils/transfer';
@@ -646,7 +648,29 @@ export abstract class BaseAppService implements AppService {
   }
 
   async loadLibraryBooks(): Promise<Book[]> {
-    return LibrarySvc.loadLibraryBooks(this.fs, this.generateCoverImageUrl.bind(this));
+    const userId = await this.resolveScopedUserId();
+    LibrarySvc.setShelfScope(userId);
+    return LibrarySvc.loadLibraryBooks(this.fs, this.generateCoverImageUrl.bind(this), userId);
+  }
+
+  /**
+   * SELFHOSTED (fork): read a shelf file explicitly, e.g. the guest shelf's
+   * `library.json` for the import dialog. Unlike loadLibraryBooks it never
+   * re-pins the shelf-scope tracker, so peeking at another scope cannot make
+   * the sync gates treat the in-memory library as current.
+   */
+  async peekLibraryBooks(userId: string | null): Promise<Book[]> {
+    return LibrarySvc.loadLibraryBooks(this.fs, this.generateCoverImageUrl.bind(this), userId);
+  }
+
+  /**
+   * SELFHOSTED (fork): the on-disk shelf is scoped per account
+   * (`library_<uid>.json`); guests and every other build share the
+   * device-wide `library.json`.
+   */
+  private async resolveScopedUserId(): Promise<string | null> {
+    if (!SELFHOSTED) return null;
+    return getUserID();
   }
 
   requestCoverThumbnail(_book: Book): void {
@@ -658,8 +682,10 @@ export abstract class BaseAppService implements AppService {
   private storagePermissionRequested = false;
 
   async saveLibraryBooks(books: Book[], options?: SaveLibraryBooksOptions): Promise<void> {
+    const scopedUserId = await this.resolveScopedUserId();
+    LibrarySvc.setShelfScope(scopedUserId);
     try {
-      return await LibrarySvc.saveLibraryBooks(this.fs, books, options);
+      return await LibrarySvc.saveLibraryBooks(this.fs, books, options, scopedUserId);
     } catch (error) {
       // A custom library folder on Android shared storage needs All Files
       // Access. Without it the write fails with EACCES and, because callers
@@ -675,7 +701,7 @@ export abstract class BaseAppService implements AppService {
       if (!this.storagePermissionRequested) {
         this.storagePermissionRequested = true;
         if (await requestStoragePermission()) {
-          return await LibrarySvc.saveLibraryBooks(this.fs, books, options);
+          return await LibrarySvc.saveLibraryBooks(this.fs, books, options, scopedUserId);
         }
       }
       console.warn('[library] not saved: storage permission not granted', error);

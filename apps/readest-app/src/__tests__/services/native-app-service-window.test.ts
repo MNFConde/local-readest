@@ -14,6 +14,7 @@ const loadLibraryBooksMock = vi.fn(
   async (
     _fs: unknown,
     generateCoverImageUrl: (book: Record<string, unknown>) => Promise<string>,
+    _userId?: string | null,
   ) => {
     const book = {
       hash: '0123456789abcdef0123456789abcdef',
@@ -61,7 +62,9 @@ vi.mock('@/services/libraryService', () => ({
   loadLibraryBooks: (
     fs: unknown,
     generateCoverImageUrl: (book: Record<string, unknown>) => Promise<string>,
-  ) => loadLibraryBooksMock(fs, generateCoverImageUrl),
+    userId?: string | null,
+  ) => loadLibraryBooksMock(fs, generateCoverImageUrl, userId),
+  setShelfScope: vi.fn(),
 }));
 
 vi.mock('@/store/libraryStore', () => ({

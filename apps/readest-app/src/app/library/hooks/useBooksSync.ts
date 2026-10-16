@@ -27,6 +27,7 @@ import {
 } from '@/app/library/utils/libraryUtils';
 import { getBookChangedAt, getPrimaryLanguage, pickFresherGroup } from '@/utils/book';
 import { isAudiobook, parseAbsFilePath } from '@/utils/audiobook';
+import { isShelfScopeCurrent } from '@/services/libraryService';
 
 export const useBooksSync = () => {
   const _ = useTranslation();
@@ -50,6 +51,12 @@ export const useBooksSync = () => {
 
   const getNewBooks = useCallback(() => {
     if (!user) return {};
+    // SELFHOSTED (fork): account-scoped shelves. Right after a login/logout
+    // the in-memory library still belongs to the previous scope — pushing it
+    // would file the previous shelf's books into the new account (the sync
+    // effect fires the instant `user` flips, before the shelf re-read lands).
+    // The re-read re-pins the scope and this effect re-fires with the store.
+    if (!isShelfScopeCurrent()) return {};
     const library = useLibraryStore.getState().library;
     const newBooks = library
       // Demo books are the sample shelf we hand anonymous web visitors, not the
@@ -205,6 +212,12 @@ export const useBooksSync = () => {
 
   const updateLibrary = useCallback(async () => {
     if (!syncedBooks?.length) return;
+    // SELFHOSTED (fork): same scope guard as getNewBooks — a cloud pull that
+    // lands before the shelf re-read would merge the new account's cloud rows
+    // into the previous scope's in-memory shelf, and the merge's save would
+    // persist that mix into the new account's shelf file. The next sync cycle
+    // re-pulls once the scope is current.
+    if (!isShelfScopeCurrent()) return;
 
     // A cloud row for a demo book can only be a stale one pushed before #5049.
     // Merging it back would write over the local demo row — and, for a demo

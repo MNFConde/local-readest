@@ -2582,5 +2582,11 @@
   "no answer": "无响应",
   "headless": "无界面模式",
   "dashboard": "面板模式",
-  "Restart policy: exponential backoff (1s/4s/16s), circuit breaker after 5 rapid failures. Metrics arrive every 5s.": "重启策略:指数退避(1s/4s/16s),连续 5 次快速失败后熔断。指标每 5 秒推送一次。"
+  "Restart policy: exponential backoff (1s/4s/16s), circuit breaker after 5 rapid failures. Metrics arrive every 5s.": "重启策略:指数退避(1s/4s/16s),连续 5 次快速失败后熔断。指标每 5 秒推送一次。",
+  "Your guest shelf has {{count}} book(s) not in this account.": "访客书架有 {{count}} 本此账号中没有的书。",
+  "Import from Guest Shelf": "从访客书架导入",
+  "Importing shelves the book for this account; files are shared on the device and are not copied.": "导入只是把书加入本账号书架;文件在设备上按内容共享,不会复制。",
+  "Import {{count}} book(s)": "导入 {{count}} 本书",
+  "Imported {{count}} book(s) from the guest shelf": "已从访客书架导入 {{count}} 本书",
+  "Failed to import from the guest shelf.": "从访客书架导入失败。"
 }

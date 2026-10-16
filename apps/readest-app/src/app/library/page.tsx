@@ -1,6 +1,7 @@
 'use client';
 
 import BookshelvesDialog from './components/BookshelvesDialog';
+import GuestShelfImport from './components/GuestShelfImport';
 
 import clsx from 'clsx';
 import * as React from 'react';
@@ -43,6 +44,8 @@ import { getCurrentWebview } from '@tauri-apps/api/webview';
 
 import { useEnv } from '@/context/EnvContext';
 import { useAuth } from '@/context/AuthContext';
+import { isShelfScopeCurrent } from '@/services/libraryService';
+import { SELFHOSTED } from '@/utils/supabase';
 import { useThemeStore } from '@/store/themeStore';
 import { useTranslation } from '@/hooks/useTranslation';
 import { useLibraryStore } from '@/store/libraryStore';
@@ -699,6 +702,31 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
     return params.toString();
   })();
 
+  // SELFHOSTED (fork): the on-disk shelf switches with the signed-in account,
+  // and a login/logout can land while this page stays mounted (in-app login
+  // dialog, logout from settings). Re-read the shelf on scope change so the
+  // new account's books show; without it the previous scope's shelf lingers
+  // until a remount. The store's initial value matches the first render, so
+  // the effect only fires on real transitions — the cold load is initLibrary's.
+  const scopedUserId = SELFHOSTED ? (user?.id ?? null) : null;
+  const prevScopedUserIdRef = useRef<string | null>(scopedUserId);
+  useEffect(() => {
+    if (prevScopedUserIdRef.current === scopedUserId) return;
+    prevScopedUserIdRef.current = scopedUserId;
+    let cancelled = false;
+    const reloadShelf = async () => {
+      const appService = await envConfig.getAppService();
+      const library = await appService.loadLibraryBooks();
+      if (!cancelled) setLibrary(library);
+    };
+    reloadShelf().catch((error) =>
+      console.error('Failed to reload the shelf after account switch:', error),
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [scopedUserId, envConfig, setLibrary]);
+
   useEffect(() => {
     if (pendingNavigationBookIds) {
       const bookIds = pendingNavigationBookIds;
@@ -747,7 +775,10 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
     // Gating on `length > 0` was unsafe: a transient "Open with" entry made the
     // store non-empty before any disk load, so this skipped loadLibraryBooks and
     // a later save persisted the partial library (wiping library.json).
-    const hasCachedLibrary = libraryLoadedFromDisk;
+    // SELFHOSTED (fork): also require the cache to still belong to the
+    // signed-in account — logging in via /auth remounts this page with the
+    // store still holding the previous scope's (guest/other account) shelf.
+    const hasCachedLibrary = libraryLoadedFromDisk && isShelfScopeCurrent();
     const loadingTimeout = hasCachedLibrary ? null : setTimeout(() => setLoading(true), 500);
     const initLibrary = async () => {
       const appService = await envConfig.getAppService();
@@ -2124,6 +2155,7 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
       <CacheManagerWindow />
       {isSettingsDialogOpen && <SettingsDialog bookKey={''} />}
       {showCatalogManager && <CatalogDialog onClose={handleDismissOPDSDialog} />}
+      <GuestShelfImport />
       {showFeeds && <FeedsView onClose={() => setShowFeeds(false)} />}
       <AddFeedModal
         isOpen={showAddFeed}

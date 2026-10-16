@@ -29,6 +29,7 @@ git apply --3way docs/selfhosted/readest-client-selfhost.patch   # 解 6+ 文件
 - `src/admin/`（自包含管理页子树）+ `src/app/admin/page.tsx`（单路由挂载）：多端管理控制台（建/删用户、重置密码、角色、停用启用、删除书目、blob GC、Open Library 自动归组），admin 账号在 web/桌面/安卓任意端访问 `/admin`；**工程约束**：只依赖 node_modules 的 daisyUI/Radix 与 fork 自有模块（`selfhostedAuth.jwtRole` 解码 role claim），不 import 上游业务组件，上游合并冲突面≈0
 - `src/admin/AdminConsoleMenuItem.tsx`（admin 子树内）+ `src/app/library/components/SettingsMenu.tsx` 的两行挂载：设置菜单「管理控制台」入口——仅 `NEXT_PUBLIC_SELFHOSTED=1` 且所存 JWT 带 `role=admin` 时渲染（登录/登出后无需刷新页面即出现/消失；role 只做 UI 门，`/api/admin` 服务端才是闸）；URL 直达 `/admin` 仍是兼容方式
 - `src/admin/HostMonitorSection.tsx`（admin 子树内，待办⑦）：管理页「服务监控」标签页——轮询 `GET /api/admin/host-snapshot` 渲染 supervisor 推来的双服务状态/延迟/内存/CPU；无 supervisor 数据时降级为「管理层未接入」提示（发布包外部署管理页其余功能不受影响）
+- `src/app/library/components/GuestShelfImport.tsx`（新增 fork 自有组件，待办⑧）+ 书架漏斗最小 hunk（`utils/book.ts` 的 `getLibraryFilename(uid?)`、`libraryService` 增 userId 参数与作用域戳、`appService` 漏斗透传+`peekLibraryBooks`、`types/system.ts` 可选接口方法、`useBooksSync` 双闸、`library/page.tsx` 挂载校验+账号切换 effect）：账号作用域书架——访客 `library.json` 现状保留、账号各用 `library_<uid>.json`、登录可从访客架导入（行为详见上文「账号作用域书架」节）；官方模式恒走 `library.json` 与上游行为一致
 - `sync-server/supervisor/`（新增独立 crate `readest-supervisor`，待办⑦）：发布包双进程管理层——spawn/守护 sync-server+web（退避重启+熔断）、TUI 面板（ratatui）、Windows Job Object/Unix PDEATHSIG 全停防孤儿、手写 localhost HTTP 探活直连、指标快照推送（防环铁律：控制权只在 supervisor/探活不借道/推送失败不参与重启决策）；与 sync-server 零代码依赖（自带空 `[workspace]`），服务端仅加 `/api/admin/host-snapshot` 存取端点
 - `src/hooks/useQuotaStats.ts`、`useAvailablePlans.ts`：配额走自建服务端；跳过 Stripe/IAP
 - `src/libs/storage.ts`、`src/libs/sync.ts`、`src/libs/share.ts`、`src/libs/user.ts`、`src/libs/metadata.ts`、`src/services/translators/providers/deepl.ts`：**API 端点一律调用时求值**（模块级常量会在登录前固化为官方域名）+ blob 相对 URL 经 `toFullUrl` 拼接且带 Bearer 头（web 的 XHR 分支也必须走 `toFullUrl`）；`src/utils/transfer.ts`、三个 sync provider：`tauriUpload` headers 类型修正为 `Record`
@@ -107,6 +108,15 @@ git apply --3way docs/selfhosted/readest-client-selfhost.patch   # 解 6+ 文件
 - **supervisor 行为**：崩溃自动重启（指数退避 1s/4s/16s,连续 5 次快速失败熔断并写明原因）;TUI 面板显示双服务状态/延迟/内存/CPU/日志尾巴（`q` 退出=全停）;**子进程与 supervisor 同生共死**（Windows Job Object,`taskkill /F` 管理层即全灭,无孤儿占端口）;每 5 秒向 sync-server `POST /api/admin/host-snapshot` 推指标（设了 `ADMIN_TOKEN` 才推,管理页「服务监控」标签页读取,契约见 sync-protocol.md §6.6）;探活直连各自端口,推送失败不影响重启决策（防环铁律）。
 - **首次运行**：解压 → `start.bat`（打开面板窗口）→ 目录内 `sync-server.exe add-user <email> --admin` → 浏览器 `http://localhost:3000`（服务端地址填 `http://localhost:8080`）/`http://localhost:3000/admin`。桌面/安卓客户端填 `http://<PC-IP>:8080`（防火墙放行 8080/3000）。
 - 常驻服务（可选）：NSSM/任务计划程序包 `readest-supervisor.exe --headless`（headless 输出状态行,stdout 进服务日志）;supervisor 守护两服务,服务管理器守护 supervisor,闭合最后一环。
+
+## 账号作用域书架（2026-10-16,待办⑧）
+
+每台设备上书架按账号隔离：未登录=访客书架（`library.json`,现状保留）,登录账号各自 `library_<uid>.json`;备份/分组/删除/云同步等所有调用方零改动（书架读写收窄在 `appService.load/saveLibraryBooks` 漏斗,按当前登录态自动选文件）。
+
+- **访客导入**：登录后书架右下角出现「访客书架有 N 本此账号中没有的书」横幅 → 点「导入」勾选导入选书 → 并入当前账号书架。文件按 hash 设备级共享,导入不复制文件、**不清空访客书架**（登出后访客书原样回来）。
+- **泄漏防护**：登录/登出瞬间内存书架仍属旧作用域——客户端书架打上作用域戳,同步 push/merge 双闸在作用域未重读前不放行（防旧书架被推入新账号,这正是上游「换账号书全带过去」的根因之一）;书架页挂载与账号切换都会按作用域重读。
+- **存量用户迁移**：升级后首次登录会看到空书架 + 访客导入横幅——旧 `library.json` 里的书就是访客书架,勾选导入即可,不做自动迁移（避免旧设备书架被第一个登录的账号独吞）。
+- **已知限制**：`lastSyncedAtBooks` 游标是设备级（上游原状）,同设备切换到另一个已有数据的账号,首次云拉取可能漏增量——下拉刷新或等周期同步可补齐;官方模式（非 selfhosted 构建）行为与上游完全一致（恒用 `library.json`）。
 
 ## 重生成补丁
 

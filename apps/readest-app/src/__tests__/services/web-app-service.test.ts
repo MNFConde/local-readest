@@ -34,6 +34,7 @@ vi.mock('@/services/settingsService', () => ({
 vi.mock('@/services/libraryService', () => ({
   loadLibraryBooks: vi.fn().mockResolvedValue([]),
   saveLibraryBooks: vi.fn().mockResolvedValue(undefined),
+  setShelfScope: vi.fn(),
 }));
 
 vi.mock('@/services/bookService', () => ({

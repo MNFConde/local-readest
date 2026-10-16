@@ -249,6 +249,9 @@ export interface AppService {
   loadFeeds(): Promise<RssFeed[]>;
   saveFeeds(feeds: RssFeed[]): Promise<void>;
   loadLibraryBooks(): Promise<Book[]>;
+  // SELFHOSTED (fork): read a shelf file explicitly (e.g. the guest shelf for
+  // the import dialog) without re-pinning the shelf-scope tracker.
+  peekLibraryBooks?(userId: string | null): Promise<Book[]>;
   requestCoverThumbnail(book: Book): void;
   saveLibraryBooks(books: Book[], options?: SaveLibraryBooksOptions): Promise<void>;
   getCoverImageUrl(book: Book): string;
