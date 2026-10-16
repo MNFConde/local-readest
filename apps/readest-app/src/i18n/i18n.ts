@@ -29,8 +29,11 @@ const initI18n = async () => {
         tt: ['ru', 'en'],
         default: ['en'],
       },
-      ns: ['translation'],
+      // SELFHOSTED (fork): fork-only strings live in the 'selfhost' namespace so
+      // every locales/*/translation.json stays byte-identical to upstream.
+      ns: ['translation', 'selfhost'],
       defaultNS: 'translation',
+      fallbackNS: 'translation',
       ...(isBrowser && {
         backend: {
           loadPath: '/locales/{{lng}}/{{ns}}.json',

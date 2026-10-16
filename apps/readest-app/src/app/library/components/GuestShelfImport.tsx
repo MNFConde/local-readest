@@ -21,7 +21,7 @@ import { SELFHOSTED } from '@/utils/supabase';
 import { eventDispatcher } from '@/utils/event';
 
 const GuestShelfImport: React.FC = () => {
-  const _ = useTranslation();
+  const _ = useTranslation('selfhost');
   const { envConfig, appService } = useEnv();
   const { user } = useAuth();
   const libraryBooks = useLibraryStore((state) => state.library);

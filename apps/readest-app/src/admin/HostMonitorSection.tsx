@@ -46,7 +46,7 @@ function stateBadgeClass(state: string): string {
 }
 
 function ServiceRow({ service }: { service: HostServiceStatus }) {
-  const _ = useTranslation();
+  const _ = useTranslation('selfhost');
   const probe = service.probe;
   const probeText = !probe
     ? '—'
@@ -77,7 +77,7 @@ function ServiceRow({ service }: { service: HostServiceStatus }) {
 }
 
 export default function HostMonitorSection() {
-  const _ = useTranslation();
+  const _ = useTranslation('selfhost');
   const [snapshot, setSnapshot] = useState<HostSnapshot | null>(null);
   const [ageSecs, setAgeSecs] = useState<number | null>(null);
   const [state, setState] = useState<'loading' | 'connected' | 'disconnected' | 'error'>('loading');

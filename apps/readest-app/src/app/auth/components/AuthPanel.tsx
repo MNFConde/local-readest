@@ -25,7 +25,7 @@ export default function AuthPanel({
   onProviderSignIn,
   onSelfhostedLogin,
 }: AuthPanelProps) {
-  const _ = useTranslation();
+  const _ = useTranslation('selfhost');
   // `signInWithOAuth` redirects the whole page on web, which can cut off the
   // opt-in's settings write. Hold sign-in until it has landed. Null until the
   // user actually touches the checkbox, so the common path adds no delay.

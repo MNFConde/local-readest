@@ -29,7 +29,7 @@ function formatCreated(unix: string): string {
 }
 
 export default function AdminApp() {
-  const _ = useTranslation();
+  const _ = useTranslation('selfhost');
   const [gate, setGate] = useState<Gate>('checking');
   const [selfEmail, setSelfEmail] = useState<string>('');
   const [tab, setTab] = useState<Tab>('users');

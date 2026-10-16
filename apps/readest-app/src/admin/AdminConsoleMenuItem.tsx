@@ -28,7 +28,7 @@ interface AdminConsoleMenuItemProps {
  * appears (or disappears) without a page reload.
  */
 const AdminConsoleMenuItem: React.FC<AdminConsoleMenuItemProps> = ({ onNavigated }) => {
-  const _ = useTranslation();
+  const _ = useTranslation('selfhost');
   const router = useRouter();
   const [isAdmin, setIsAdmin] = useState(false);
 

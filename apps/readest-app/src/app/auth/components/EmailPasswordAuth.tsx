@@ -32,7 +32,7 @@ export default function EmailPasswordAuth({
   magicLink = false,
   onSelfhostedLogin,
 }: EmailPasswordAuthProps) {
-  const _ = useTranslation();
+  const _ = useTranslation('selfhost');
   const [view, setView] = useState<AuthView>('sign_in');
   const [defaultEmail, setDefaultEmail] = useState('');
   const [loading, setLoading] = useState(false);
