@@ -9,7 +9,7 @@
 // connected" simply means no supervisor feed — everything else on this page
 // keeps working.
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from '@/hooks/useTranslation';
 import { adminApi, AdminApiError, HostServiceStatus, HostSnapshot } from './adminApi';
 
