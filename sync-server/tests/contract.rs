@@ -36,6 +36,7 @@ pub fn test_state(cfg: Config) -> SharedState {
         db: Mutex::new(conn),
         cfg,
         login_limiter: Mutex::new(sync_server::ratelimit::LoginLimiter::new()),
+        host_snapshot: Mutex::new(None),
     })
 }
 
@@ -1866,4 +1867,62 @@ async fn proxies_require_auth() {
     let app = routes::router(state.clone());
     let (status, _, _) = request(app, "GET", "/api/metadata/search?q=x", None, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn admin_host_snapshot_store_query_and_auth() {
+    let mut cfg = test_config("host-snap");
+    cfg.admin_token = Some("op-token-123".into());
+    let state = test_state(cfg);
+    let app = routes::router(state);
+
+    // Absent by default: the admin page shows "supervisor not connected".
+    let (status, body, _) =
+        admin_request(app.clone(), "GET", "/api/admin/host-snapshot", Some("op-token-123"), None)
+            .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["available"], json!(false));
+
+    // No credential → 401 on both verbs; a non-object body → 400.
+    let (status, _, _) =
+        admin_request(app.clone(), "POST", "/api/admin/host-snapshot", None, Some(json!({"schema": 1})))
+            .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = admin_request(
+        app.clone(),
+        "POST",
+        "/api/admin/host-snapshot",
+        Some("op-token-123"),
+        Some(json!(["not", "an", "object"])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Supervisor push: 204 no content; the newest snapshot is served back
+    // verbatim with a freshness stamp.
+    let snapshot = json!({
+        "schema": 1,
+        "ts": 1760000000,
+        "supervisor": { "version": "0.12.14", "pid": 123, "uptime_secs": 10, "headless": false },
+        "host": { "os": "windows", "cores": 8, "total_memory_bytes": 17_000_000_000u64 },
+        "services": [ { "name": "sync-server", "state": "running" } ]
+    });
+    let (status, _, _) = admin_request(
+        app.clone(),
+        "POST",
+        "/api/admin/host-snapshot",
+        Some("op-token-123"),
+        Some(snapshot.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, body, _) =
+        admin_request(app, "GET", "/api/admin/host-snapshot", Some("op-token-123"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["available"], json!(true));
+    assert_eq!(body["snapshot"], snapshot);
+    assert!(body["received_at"].as_u64().unwrap() > 0);
+    assert!(body["age_secs"].as_u64().unwrap() < 60);
 }

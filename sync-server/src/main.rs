@@ -156,6 +156,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         db: conn.into(),
         cfg,
         login_limiter: Mutex::new(sync_server::ratelimit::LoginLimiter::new()),
+        host_snapshot: Mutex::new(None),
     });
 
     let addr = state.cfg.listen_addr.clone();

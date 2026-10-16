@@ -34,6 +34,9 @@ pub fn router(state: SharedState) -> Router<SharedState> {
         .route("/users/{email}/password", post(reset_password))
         .route("/users/{email}/role", post(set_user_role))
         .route("/users/{email}/state", post(set_user_state))
+        // Supervisor metrics feed (ROADMAP 待办⑦): the process manager POSTs
+        // a snapshot every few seconds; the admin page reads the newest one.
+        .route("/host-snapshot", get(get_host_snapshot).post(post_host_snapshot))
         .with_state(state)
 }
 
@@ -635,4 +638,62 @@ async fn set_user_state(
     let conn = state.db.lock().map_err(|_| super::admin_error("db lock poisoned"))?;
     let n = crate::users::set_disabled(&conn, &email, disabled).map_err(|e| super::admin_error(e))?;
     Ok(Json(json!({ "updated": n })).into_response())
+}
+
+// ── supervisor host snapshot ────────────────────────────────────────────────
+// The supervisor (sync-server/supervisor/) pushes process/host metrics here
+// every few seconds with the operator token; the admin page's server monitor
+// reads the newest entry. In-memory only — a restart just marks it "not
+// connected" until the next push. The server stores the payload verbatim
+// (schema contract: docs/selfhosted/sync-protocol.md §6.6).
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+async fn post_host_snapshot(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Response, Response> {
+    require_admin(&state, &headers).await?;
+    let snapshot: Value =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
+    if !snapshot.is_object() {
+        return Err(StatusCode::BAD_REQUEST.into_response());
+    }
+    let mut slot = state
+        .host_snapshot
+        .lock()
+        .map_err(|_| super::admin_error("snapshot lock poisoned"))?;
+    *slot = Some(crate::db::HostSnapshotEntry {
+        received_at_unix: unix_now(),
+        body: snapshot,
+    });
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn get_host_snapshot(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    require_admin(&state, &headers).await?;
+    let slot = state
+        .host_snapshot
+        .lock()
+        .map_err(|_| super::admin_error("snapshot lock poisoned"))?;
+    let now = unix_now();
+    Ok(match slot.as_ref() {
+        None => Json(json!({ "available": false })).into_response(),
+        Some(entry) => Json(json!({
+            "available": true,
+            "received_at": entry.received_at_unix,
+            "age_secs": now.saturating_sub(entry.received_at_unix),
+            "snapshot": entry.body,
+        }))
+        .into_response(),
+    })
 }

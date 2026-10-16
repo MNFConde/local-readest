@@ -9,12 +9,22 @@ use crate::config::Config;
 /// A single SQLite connection behind a mutex: home-scale traffic is tiny and
 /// the queries are sub-millisecond, so serializing them is fine and sidesteps
 /// WAL/busy handling entirely.
+/// Latest host-metrics snapshot POSTed by the supervisor (ROADMAP 待办⑦).
+/// In-memory only: it is a live feed, losing it on restart is fine.
+pub struct HostSnapshotEntry {
+    pub received_at_unix: u64,
+    pub body: serde_json::Value,
+}
+
 pub struct AppState {
     pub db: Mutex<Connection>,
     pub cfg: Config,
     /// Brute-force lock state for POST /api/auth (in-memory by design: a
     /// restart forgiving lockouts is acceptable for a self-hosted server).
     pub login_limiter: Mutex<crate::ratelimit::LoginLimiter>,
+    /// Newest supervisor metrics snapshot, if the supervisor ever delivered
+    /// one (None = "not connected" for the admin page's server monitor).
+    pub host_snapshot: Mutex<Option<HostSnapshotEntry>>,
 }
 
 pub type SharedState = std::sync::Arc<AppState>;
