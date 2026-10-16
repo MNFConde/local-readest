@@ -28,6 +28,8 @@ git apply --3way docs/selfhosted/readest-client-selfhost.patch   # 解 6+ 文件
 - `src/app/auth/*`（AuthPanel / EmailPasswordAuth / page / recovery / update）：登录 UI——服务端地址框 + 账号（邮箱）框 + 密码框（可空），隐藏 OAuth
 - `src/admin/`（自包含管理页子树）+ `src/app/admin/page.tsx`（单路由挂载）：多端管理控制台（建/删用户、重置密码、角色、停用启用、删除书目、blob GC、Open Library 自动归组），admin 账号在 web/桌面/安卓任意端访问 `/admin`；**工程约束**：只依赖 node_modules 的 daisyUI/Radix 与 fork 自有模块（`selfhostedAuth.jwtRole` 解码 role claim），不 import 上游业务组件，上游合并冲突面≈0
 - `src/admin/AdminConsoleMenuItem.tsx`（admin 子树内）+ `src/app/library/components/SettingsMenu.tsx` 的两行挂载：设置菜单「管理控制台」入口——仅 `NEXT_PUBLIC_SELFHOSTED=1` 且所存 JWT 带 `role=admin` 时渲染（登录/登出后无需刷新页面即出现/消失；role 只做 UI 门，`/api/admin` 服务端才是闸）；URL 直达 `/admin` 仍是兼容方式
+- `src/admin/HostMonitorSection.tsx`（admin 子树内，待办⑦）：管理页「服务监控」标签页——轮询 `GET /api/admin/host-snapshot` 渲染 supervisor 推来的双服务状态/延迟/内存/CPU；无 supervisor 数据时降级为「管理层未接入」提示（发布包外部署管理页其余功能不受影响）
+- `sync-server/supervisor/`（新增独立 crate `readest-supervisor`，待办⑦）：发布包双进程管理层——spawn/守护 sync-server+web（退避重启+熔断）、TUI 面板（ratatui）、Windows Job Object/Unix PDEATHSIG 全停防孤儿、手写 localhost HTTP 探活直连、指标快照推送（防环铁律：控制权只在 supervisor/探活不借道/推送失败不参与重启决策）；与 sync-server 零代码依赖（自带空 `[workspace]`），服务端仅加 `/api/admin/host-snapshot` 存取端点
 - `src/hooks/useQuotaStats.ts`、`useAvailablePlans.ts`：配额走自建服务端；跳过 Stripe/IAP
 - `src/libs/storage.ts`、`src/libs/sync.ts`、`src/libs/share.ts`、`src/libs/user.ts`、`src/libs/metadata.ts`、`src/services/translators/providers/deepl.ts`：**API 端点一律调用时求值**（模块级常量会在登录前固化为官方域名）+ blob 相对 URL 经 `toFullUrl` 拼接且带 Bearer 头（web 的 XHR 分支也必须走 `toFullUrl`）；`src/utils/transfer.ts`、三个 sync provider：`tauriUpload` headers 类型修正为 `Record`
 - `src/services/transferManager.ts`：错误信息透传（利于排障自建服务端错误）
@@ -88,21 +90,23 @@ git apply --3way docs/selfhosted/readest-client-selfhost.patch   # 解 6+ 文件
 - 管理页：admin 账号登录后,书库页设置菜单有「管理控制台」入口（2026-10-15 起,需带该改动的客户端包）;URL 直达 `http://<host>:3000/admin` 继续可用,服务端内嵌静态页 `:8080/admin` 仍作兜底。
 - 桌面/安卓包要获得管理页与账号密码登录，需在 `.env.local` 设 `NEXT_PUBLIC_SELFHOSTED=1` 后重打包（随下一版发布）。
 
-## 自托管发布包（方案 B,2026-10-15）
+## 自托管发布包（方案 B,2026-10-15;⑦ 管理层 2026-10-16 并入）
 
-无 Docker 的一条命令全套：一个 Windows zip,解压后 `start.bat` 同时拉起 sync-server（:8080）与网页端（:3000,standalone 产物 `node` 直跑,免 pnpm,需 Node ≥20 在 PATH）。
+无 Docker 的一条命令全套：一个 Windows zip,入口是 `readest-supervisor.exe`（待办⑦ 的双进程管理层）——拉起并守护 sync-server（:8080）与网页端（:3000,standalone 产物 `node` 直跑,免 pnpm,需 Node ≥20 在 PATH 或 `READEST_NODE`）。
 
 - **产出方式一（本地）**：
   ```bash
   cd sync-server && cargo build --release
+  cd sync-server/supervisor && cargo build --release
   cd apps/readest-app && NEXT_PUBLIC_SELFHOSTED=1 BUILD_STANDALONE=true pnpm build-web
   node scripts/selfhost/package-server-bundle.mjs --zip
   # → build/selfhost-server/ + build/readest-selfhost-server_<ver>_x86_64-pc-windows-msvc.zip
   ```
 - **产出方式二（CI）**：`release-selfhost.yml` 的 `build-server-bundle` job（tag 推送触发）,同一脚本打包并挂到 GitHub Release。
-- **包内容**：`sync-server.exe` + `web/`（standalone 树 + static/public,`.pnpm` 已摊平成 npm 式扁平 `node_modules`,**零链接**——junction/symlink 进 zip 后普通账号解压即断,勿回退）+ `start.bat`/`stop.bat` + `README.txt`。端口覆写:`PORT`/`LISTEN_ADDR` 环境变量。
-- **首次运行**：解压 → `start.bat` → 目录内 `sync-server.exe add-user <email> --admin` → 浏览器 `http://localhost:3000`（服务端地址填 `http://localhost:8080`）/`http://localhost:3000/admin`。桌面/安卓客户端填 `http://<PC-IP>:8080`（防火墙放行 8080/3000）。
-- 常驻服务（可选）：任务计划程序登录触发 `start.bat`,或 NSSM 包 `sync-server.exe` + `node apps\readest-app\server.js`（cwd=web）两个服务。
+- **包内容**：`readest-supervisor.exe`（入口/管理者）+ `sync-server.exe` + `web/`（standalone 树 + static/public,`.pnpm` 已摊平成 npm 式扁平 `node_modules`,**零链接**——junction/symlink 进 zip 后普通账号解压即断,勿回退）+ `start.bat`/`stop.bat` + `README.txt` + `logs/`。端口覆写:`PORT`/`LISTEN_ADDR` 环境变量（同一份 `.env`）。
+- **supervisor 行为**：崩溃自动重启（指数退避 1s/4s/16s,连续 5 次快速失败熔断并写明原因）;TUI 面板显示双服务状态/延迟/内存/CPU/日志尾巴（`q` 退出=全停）;**子进程与 supervisor 同生共死**（Windows Job Object,`taskkill /F` 管理层即全灭,无孤儿占端口）;每 5 秒向 sync-server `POST /api/admin/host-snapshot` 推指标（设了 `ADMIN_TOKEN` 才推,管理页「服务监控」标签页读取,契约见 sync-protocol.md §6.6）;探活直连各自端口,推送失败不影响重启决策（防环铁律）。
+- **首次运行**：解压 → `start.bat`（打开面板窗口）→ 目录内 `sync-server.exe add-user <email> --admin` → 浏览器 `http://localhost:3000`（服务端地址填 `http://localhost:8080`）/`http://localhost:3000/admin`。桌面/安卓客户端填 `http://<PC-IP>:8080`（防火墙放行 8080/3000）。
+- 常驻服务（可选）：NSSM/任务计划程序包 `readest-supervisor.exe --headless`（headless 输出状态行,stdout 进服务日志）;supervisor 守护两服务,服务管理器守护 supervisor,闭合最后一环。
 
 ## 重生成补丁
 

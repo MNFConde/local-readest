@@ -362,7 +362,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
-          workspaces: sync-server
+          workspaces: |
+            sync-server
+            sync-server/supervisor
           key: selfhost-server-bundle-x86_64-pc-windows-msvc
 
       - name: build web standalone
@@ -378,6 +380,12 @@ jobs:
 
       - name: build sync server
         working-directory: sync-server
+        run: cargo build --release
+
+      - name: build supervisor
+        # ROADMAP ⑦: the bundle's entry point — spawns and supervises both
+        # services (backoff restarts, dashboard TUI, Job-Object cleanup).
+        working-directory: sync-server/supervisor
         run: cargo build --release
 
       - name: package bundle

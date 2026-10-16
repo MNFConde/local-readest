@@ -1,15 +1,20 @@
 #!/usr/bin/env node
 /**
- * Assemble the Windows self-host server bundle (ROADMAP 待办⑥ / 方案 B):
+ * Assemble the Windows self-host server bundle (ROADMAP 待办⑥+⑦ / 方案 B):
  *
+ *   readest-supervisor.exe   THE entry point: spawns and supervises both
+ *                            services (backoff restarts + circuit breaker,
+ *                            TUI dashboard, both children die with it)
  *   sync-server.exe          sync/auth/OPDS/admin API + data      → port 8080
  *   web/                     Next.js standalone server (web reader, /admin)
  *                            — plain `node`, no pnpm, no source tree → port 3000
- *   start.bat / stop.bat     bring both up / take both down
+ *   start.bat / stop.bat     open the supervisor dashboard / stop everything
  *
  * Inputs (all must exist before this script runs):
  *   sync-server/target/release/sync-server.exe
  *       cargo build --release   (run inside sync-server/)
+ *   sync-server/supervisor/target/release/readest-supervisor.exe
+ *       cargo build --release   (run inside sync-server/supervisor/)
  *   apps/readest-app/.next/standalone/apps/readest-app/server.js
  *   apps/readest-app/.next/static/
  *   apps/readest-app/public/
@@ -44,6 +49,7 @@ const zipIt = process.argv.includes('--zip');
 
 const inputs = {
   serverExe: path.join(root, 'sync-server', 'target', 'release', 'sync-server.exe'),
+  supervisorExe: path.join(root, 'sync-server', 'supervisor', 'target', 'release', 'readest-supervisor.exe'),
   standalone: path.join(appDir, '.next', 'standalone'),
   staticDir: path.join(appDir, '.next', 'static'),
   publicDir: path.join(appDir, 'public'),
@@ -59,6 +65,7 @@ for (const [name, p] of Object.entries(inputs)) {
     die(`missing ${name}: ${p}\n` +
       '  build them first:\n' +
       '    cd sync-server && cargo build --release\n' +
+      '    cd sync-server/supervisor && cargo build --release\n' +
       '    cd apps/readest-app && NEXT_PUBLIC_SELFHOSTED=1 BUILD_STANDALONE=true pnpm build-web');
   }
 }
@@ -142,32 +149,28 @@ for (const storeEntry of readdirSync(storeDir)) {
 }
 rmSync(storeDir, { recursive: true, force: true });
 copyFileSync(inputs.serverExe, path.join(outDir, 'sync-server.exe'));
+copyFileSync(inputs.supervisorExe, path.join(outDir, 'readest-supervisor.exe'));
 
 const CRLF = (s) => s.replace(/\n/g, '\r\n') + '\r\n';
 
 const startBat = CRLF(`@echo off
-rem Readest self-host server: starts the sync server (API, port 8080) and the
-rem web reader + admin console (port 3000). Override with LISTEN_ADDR / PORT.
-rem Requires Node.js (>= 20) on PATH for the web reader.
+rem Readest self-host server (ROADMAP ⑦): readest-supervisor starts BOTH
+rem services (sync server :8080 + web reader :3000) and supervises them —
+rem crash-restarts with backoff, live dashboard, and both services stop the
+rem moment the supervisor itself stops. Requires Node.js (>= 20) on PATH.
 setlocal
 cd /d "%~dp0"
-if not defined LISTEN_ADDR set "LISTEN_ADDR=0.0.0.0:8080"
-start "readest-sync-server" /min /d "%~dp0" sync-server.exe
-set "NODE_ENV=production"
-if not defined SELF_HOSTED set "SELF_HOSTED=true"
-if not defined PORT set "PORT=3000"
-if not defined HOSTNAME set "HOSTNAME=0.0.0.0"
-rem Launch node directly: closing its window stops the server too (a cmd
-rem wrapper would keep node alive after the window closes).
-start "readest-web" /min /d "%~dp0web" node "apps\\readest-app\\server.js"
+start "Readest Server" readest-supervisor.exe
 echo.
-echo   Web reader     :  http://localhost:%PORT%/
-echo   Admin console  :  http://localhost:%PORT%/admin   (admin account required)
-echo   Sync server    :  %LISTEN_ADDR%/api/health
+echo   Web reader     :  http://localhost:3000/
+echo   Admin console  :  http://localhost:3000/admin   (admin account required)
+echo   Sync server    :  http://localhost:8080/api/health
 echo   Data directory :  %~dp0data
 echo.
-echo   Both run in minimized windows. Stop them with stop.bat or by closing
-echo   the windows. First admin account (run here once):
+echo   The dashboard runs in its own window ("Readest Server"): live status,
+echo   latency and memory of both services; press q there to stop everything.
+echo   Headless mode (services / task scheduler):  readest-supervisor.exe --headless
+echo   First admin account (run here once):
 echo       sync-server.exe add-user ^<email^> --admin
 echo   Desktop/Android clients use  http://<this-pc-ip>:8080  as server address.
 echo.
@@ -175,9 +178,11 @@ endlocal
 `);
 
 const stopBat = CRLF(`@echo off
-rem sync-server: kill by image name (a dedicated exe, unambiguous).
+rem The supervisor owns both services (Windows Job Object): killing it takes
+rem them down with it. The two extra kills below only catch services that
+rem were started manually outside the supervisor.
+taskkill /IM readest-supervisor.exe /F >nul 2>&1
 taskkill /IM sync-server.exe /F >nul 2>&1
-rem node: has no window of its own, so match it by command line instead.
 powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -like '*readest-app\\server.js*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }" >nul 2>&1
 echo Readest self-host server stopped.
 `);
@@ -186,41 +191,54 @@ const readme = CRLF(`Readest Self-Host Server ${version} (Windows x64)
 ==========================================
 
 What is inside
+  readest-supervisor.exe  THE entry point: starts and supervises both
+                    services. Dashboard TUI by default (--headless for
+                    services); restarts crashed services with backoff
+                    (1s/4s/16s, gives up after 5 rapid failures and says
+                    why); both services stop together with it.
   sync-server.exe   Sync/auth/OPDS/admin API + book storage (port 8080).
   web\\              Web reader + admin console, standalone Next.js server
                     (port 3000). Needs Node.js >= 20 on PATH; no pnpm needed.
-  start.bat         Starts both (minimized windows). stop.bat stops them.
+  start.bat         Opens the supervisor dashboard. stop.bat stops everything.
+  logs\\             Per-service log files (also shown in the dashboard).
   data\\             Created on first start: SQLite DB + book files.
 
 First run
-  1. Double-click start.bat.
+  1. Double-click start.bat (the dashboard window opens).
   2. Open a terminal in this folder and create the admin account:
        sync-server.exe add-user you@example.com --admin
      (--admin marks the account as administrator; plain users can be created
      from the admin console or without the flag.)
   3. Web reader + admin console:  http://localhost:3000  /  http://localhost:3000/admin
      Login there with the server address  http://localhost:8080  plus the
-     account and password from step 2.
+     account and password from step 2. The admin console's "Server Monitor"
+     tab shows live service status when ADMIN_TOKEN is set (see below).
   4. Desktop/Android apps: set the sync server address to
      http://<this-pc-ip>:8080 (same account). LAN access requires a firewall
      rule allowing inbound TCP 8080 and 3000.
 
-Configuration (optional environment variables, set before starting)
+Configuration (same .env file as the sync server, beside the exes)
   LISTEN_ADDR   Sync server bind address   (default 0.0.0.0:8080)
   PORT / HOSTNAME  Web server bind         (default 3000 / 0.0.0.0)
   DATA_DIR      Data directory             (default .\\data)
   QUOTA_BYTES   Per-user storage quota     (default 2 GiB)
-  ADMIN_TOKEN   Break-glass API token for /api/admin (the admin account's
-                own login is the primary admin credential)
+  ADMIN_TOKEN   Break-glass API token for /api/admin; ALSO enables the
+                supervisor's metrics feed for the admin console's
+                Server Monitor tab (pushed locally every 5s)
+  READEST_NODE  Path to the node executable (default: node.exe beside the
+                exes if present, else PATH)
 
 Run as a service (optional)
-  The bundled start.bat is an ordinary program; register it with the Windows
-  Task Scheduler ("At log on") or NSSM if it should survive without a user
-  session:  schtasks /Create /TN ReadestServer /SC ONLOGON /TR "<path>\\start.bat"
+  Use the supervisor's headless mode, not the dashboard:
+    NSSM:  nssm install ReadestServer "<path>\\readest-supervisor.exe" --headless
+    schtasks /Create /TN ReadestServer /SC ONLOGON /TR "<path>\\readest-supervisor.exe --headless"
+  (The supervisor keeps both services alive; whatever restarts the supervisor
+  itself covers the last gap.)
 
 Updating
-  Replace sync-server.exe and web\\ with the new release's copies; data\\ is
-  compatible across releases and migrations run automatically at boot.
+  Replace readest-supervisor.exe, sync-server.exe and web\\ with the new
+  release's copies; data\\ is compatible across releases and migrations run
+  automatically at boot.
 `);
 
 writeFileSync(path.join(outDir, 'start.bat'), startBat);

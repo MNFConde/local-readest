@@ -176,6 +176,41 @@ Edge TTS 依赖微软免费接口（websocket 协议）；Rust 实现可用等�
 
 `GET /api/metadata/search` 的 OL 映射额外保留 `workKey`/`editionKeys`/`language`（§5 表中形状不变，仅新增字段），供自动归组复用同一查询。
 
+### 6.6 管理层指标快照 /api/admin/host-snapshot（待办⑦）
+
+发布包里的 `readest-supervisor`（独立进程管理者，拉起并守护 sync-server + web 双服务）每 5 秒向本端点推送一份宿主/子进程指标快照（`Authorization: Bearer <ADMIN_TOKEN>`；**未设 ADMIN_TOKEN 即不推送**）。服务端原样存内存最新一份（不落库、重启即空），管理页「服务监控」标签页轮询读取。
+
+| 端点 | 说明 |
+|---|---|
+| `POST /api/admin/host-snapshot` | 提交快照（JSON 对象；非对象 400）。成功 **204** 无响应体 |
+| `GET /api/admin/host-snapshot` | `{"available":false}`（从未收到过）或 `{"available":true,"received_at":<unix秒>,"age_secs":<n>,"snapshot":{…原样}}` |
+
+快照 JSON 契约（v1，字段对读取方全部可选、只增不改）：
+
+```json
+{
+  "schema": 1,
+  "ts": 1760000000,
+  "supervisor": { "version": "0.12.14", "pid": 1234, "uptime_secs": 600, "headless": false },
+  "host": { "os": "windows", "cores": 8, "total_memory_bytes": 17000000000 },
+  "services": [
+    {
+      "name": "sync-server",
+      "state": "running",
+      "pid": 1234, "uptime_secs": 600, "restarts": 0, "consecutive_failures": 0,
+      "last_exit": { "code": 1, "uptime_secs": 2 },
+      "probe": { "ok": true, "status": 200, "rtt_ms": 3 },
+      "memory_bytes": 45000000, "cpu_percent": 0.5,
+      "circuit_reason": null
+    }
+  ]
+}
+```
+
+`state` 取值：`starting|running|restarting|circuit open|stopped`；`probe` 为 supervisor 对各服务**直连**（sync 打 `/api/health`、web 打 `/`）的探活结果。
+
+**防环铁律**（supervisor 与本端点的边界）：控制权只在 supervisor（服务端只存数、不给数、不下令）；探活直连各服务端口、绝不借道兄弟进程；推送失败只记日志、保留旧快照，永不参与重启决策。管理页在 `available:false` 时按「管理层未接入」降级展示，其余管理功能不受影响。
+
 ## 7. 服务端配置（本项目 env 集）
 
 | env | 缺省 | 说明 |
@@ -186,7 +221,8 @@ Edge TTS 依赖微软免费接口（websocket 协议）；Rust 实现可用等�
 | `QUOTA_BYTES` | 2 GiB（每人） | 存储配额 |
 | `MAX_BODY_BYTES` | 512 MiB | 单请求体上限（axum 默认仅 2 MiB，会拒掉整本书的 blob PUT；注意 blob 体整体进内存， audiobook 等超大文件按需调低/调高） |
 | `LIBRARY_SHARED` | `1` | `0` = OPDS 目录只显示调用者自己的上传 |
-| `ADMIN_TOKEN` | 空 | 运维兜底轨：设了才能用静态页 + Bearer token 直调 /api/admin；**不设也不影响** admin 用户 JWT 走客户端管理页 |
+| `ADMIN_TOKEN` | 空 | 运维兜底轨：设了才能用静态页 + Bearer token 直调 /api/admin；**不设也不影响** admin 用户 JWT 走客户端管理页；设了同时启用 supervisor→管理页的指标推送（§6.6） |
+| `READEST_NODE` | 空 | readest-supervisor 专用：node 可执行文件路径（缺省依次找 exe 旁 `node`/`node.exe` → PATH；web 服务需要 Node ≥ 20） |
 | `DEEPL_API_KEY` / `DEEPL_ENDPOINT` | 空 | 空 = mock 回显 |
 | `RUST_LOG` | `info` | tracing |
 
