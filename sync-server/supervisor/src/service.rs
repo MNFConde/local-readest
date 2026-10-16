@@ -131,6 +131,13 @@ pub async fn run_service(
     let mut failures: u32 = 0;
 
     loop {
+        // The backoff sleep races the kill signal; whichever wins, never
+        // spawn a fresh child after shutdown was requested.
+        if *kill.borrow() {
+            let mut st = dash.status(slot);
+            st.phase = Phase::Stopped;
+            return;
+        }
         let mut child = match build_command(&spec).spawn() {
             Ok(c) => c,
             Err(e) => {

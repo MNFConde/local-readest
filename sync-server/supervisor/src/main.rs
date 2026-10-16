@@ -212,11 +212,16 @@ async fn main() -> ExitCode {
     }
 
     // Shutdown: tell every task, make sure children actually die (a runner
-    // could be mid-backoff with no child to kill), then reap.
+    // could be mid-backoff with no child to kill), then reap — with ONE
+    // global budget, not five seconds per task (observed on Linux: probes
+    // into dead services can each eat their full timeout).
     let _ = kill_tx.send(true);
     platform::terminate_children();
-    for t in tasks {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), t).await;
-    }
+    let reaper = tokio::spawn(async move {
+        for t in tasks {
+            let _ = t.await;
+        }
+    });
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(6), reaper).await;
     ExitCode::SUCCESS
 }
