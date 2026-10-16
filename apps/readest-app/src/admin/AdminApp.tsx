@@ -9,10 +9,11 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from '@/hooks/useTranslation';
 import { jwtRole, jwtToUser } from '@/services/selfhostedAuth';
 import { adminApi, AdminApiError, AdminUser, CatalogBook } from './adminApi';
+import HostMonitorSection from './HostMonitorSection';
 
 type Gate = 'checking' | 'ok' | 'denied' | 'anon';
 
-type Tab = 'users' | 'books' | 'maintenance';
+type Tab = 'users' | 'books' | 'monitor' | 'maintenance';
 
 type Dialog =
   | { kind: 'delete-user'; email: string }
@@ -185,6 +186,7 @@ export default function AdminApp() {
             [
               ['users', _('Users')],
               ['books', _('Books')],
+              ['monitor', _('Server Monitor')],
               ['maintenance', _('Maintenance')],
             ] as [Tab, string][]
           ).map(([key, label]) => (
@@ -386,6 +388,8 @@ export default function AdminApp() {
             </div>
           </section>
         )}
+
+        {tab === 'monitor' && <HostMonitorSection />}
 
         {tab === 'maintenance' && (
           <section className='card bg-base-100 max-w-xl shadow'>

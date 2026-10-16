@@ -33,6 +33,44 @@ export interface CatalogBook {
   addedBy: string;
 }
 
+// ── supervisor server monitor (sync-protocol.md §6.6) ─────────────────────
+// Host/process metrics pushed by readest-supervisor. Fields are optional on
+// purpose: the server stores the payload verbatim and the schema may grow.
+
+export interface HostServiceStatus {
+  name: string;
+  state: string;
+  pid?: number | null;
+  uptime_secs?: number | null;
+  restarts?: number;
+  consecutive_failures?: number;
+  last_exit?: { code?: number | null; uptime_secs?: number } | null;
+  probe?: { ok: boolean; status: number; rtt_ms: number } | null;
+  memory_bytes?: number;
+  cpu_percent?: number;
+  circuit_reason?: string | null;
+}
+
+export interface HostSnapshot {
+  schema?: number;
+  ts?: number;
+  supervisor?: {
+    version?: string;
+    pid?: number;
+    uptime_secs?: number;
+    headless?: boolean;
+  };
+  host?: { os?: string; cores?: number; total_memory_bytes?: number };
+  services?: HostServiceStatus[];
+}
+
+export interface HostSnapshotQuery {
+  available: boolean;
+  received_at?: number;
+  age_secs?: number;
+  snapshot?: HostSnapshot;
+}
+
 function authHeader(): Record<string, string> {
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
   if (!token) {
@@ -132,4 +170,7 @@ export const adminApi = {
     adminFetch<{ enriched: number; failed: { hash: string; error: string }[] }>('/enrich', {
       method: 'POST',
     }),
+
+  /** Newest supervisor metrics snapshot; available=false when not connected. */
+  getHostSnapshot: () => adminFetch<HostSnapshotQuery>('/host-snapshot'),
 };

@@ -2569,5 +2569,18 @@
   "Email is required": "请填写邮箱",
   "Empty password = a random one is generated and shown once. Check the server log for passwordless accounts.": "密码留空=随机生成并仅显示一次。免密账号会在服务端日志中警告。",
   "Maintenance": "维护",
-  "Created passwordless account — login needs only the email": "已创建免密账号——仅凭邮箱即可登录"
+  "Created passwordless account — login needs only the email": "已创建免密账号——仅凭邮箱即可登录",
+  "Server Monitor": "服务监控",
+  "Supervisor not connected — run readest-supervisor (bundle deployments) and set ADMIN_TOKEN to feed this panel.": "管理层未接入——请运行 readest-supervisor(发布包部署)并在 .env 设置 ADMIN_TOKEN,本面板即有数据。",
+  "Updated {{age}}s ago · supervisor v{{version}} ({{mode}}) · {{os}} · {{cores}} cores · {{mem}} RAM": "{{age}} 秒前更新 · 管理层 v{{version}}({{mode}})· {{os}} · {{cores}} 核 · {{mem}} 内存",
+  "Service": "服务",
+  "State": "状态",
+  "Uptime": "运行时长",
+  "Restarts": "重启次数",
+  "Memory": "内存",
+  "Latency": "延迟",
+  "no answer": "无响应",
+  "headless": "无界面模式",
+  "dashboard": "面板模式",
+  "Restart policy: exponential backoff (1s/4s/16s), circuit breaker after 5 rapid failures. Metrics arrive every 5s.": "重启策略:指数退避(1s/4s/16s),连续 5 次快速失败后熔断。指标每 5 秒推送一次。"
 }
