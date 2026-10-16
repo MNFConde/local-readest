@@ -1,0 +1,41 @@
+# SELFHOSTED (fork): decoupling guard + security audits for the selfhosted
+# branch. Kept separate from the upstream pull-request.yml on purpose — that
+# file stays as close to upstream text as possible.
+name: Selfhost Checks
+
+on:
+  push:
+    branches: [selfhosted]
+  pull_request:
+    branches: [selfhosted]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  decoupling:
+    name: Decoupling guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the guard diffs against the merge-base with upstream
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node scripts/selfhost/check-decoupling.mjs
+
+  audit:
+    name: Security audits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo audit (sync-server, fork-owned — hard gate)
+        run: |
+          cargo install --locked cargo-audit
+          cargo audit --file sync-server/Cargo.lock
+      - name: pnpm audit (mostly upstream deps — informational only)
+        run: corepack enable && pnpm audit --audit-level high
+        continue-on-error: true
