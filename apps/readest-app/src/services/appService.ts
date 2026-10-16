@@ -39,6 +39,8 @@ import * as DictSvc from './dictionaries/dictionaryService';
 import * as FontSvc from './fontService';
 import * as ImageSvc from './imageService';
 import * as LibrarySvc from './libraryService';
+// SELFHOSTED (fork): shelf-scope tracking (moved out of libraryService).
+import { setShelfScope } from '@/libs/selfhost/shelfScope';
 import * as Settings from './settingsService';
 import {
   loadFeeds as loadFeedsFromDisk,
@@ -649,7 +651,7 @@ export abstract class BaseAppService implements AppService {
 
   async loadLibraryBooks(): Promise<Book[]> {
     const userId = await this.resolveScopedUserId();
-    LibrarySvc.setShelfScope(userId);
+    setShelfScope(userId);
     return LibrarySvc.loadLibraryBooks(this.fs, this.generateCoverImageUrl.bind(this), userId);
   }
 
@@ -683,7 +685,7 @@ export abstract class BaseAppService implements AppService {
 
   async saveLibraryBooks(books: Book[], options?: SaveLibraryBooksOptions): Promise<void> {
     const scopedUserId = await this.resolveScopedUserId();
-    LibrarySvc.setShelfScope(scopedUserId);
+    setShelfScope(scopedUserId);
     try {
       return await LibrarySvc.saveLibraryBooks(this.fs, books, options, scopedUserId);
     } catch (error) {

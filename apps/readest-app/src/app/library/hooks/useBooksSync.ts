@@ -27,7 +27,7 @@ import {
 } from '@/app/library/utils/libraryUtils';
 import { getBookChangedAt, getPrimaryLanguage, pickFresherGroup } from '@/utils/book';
 import { isAudiobook, parseAbsFilePath } from '@/utils/audiobook';
-import { isShelfScopeCurrent } from '@/services/libraryService';
+import { isShelfScopeCurrent } from '@/libs/selfhost/shelfScope';
 
 export const useBooksSync = () => {
   const _ = useTranslation();

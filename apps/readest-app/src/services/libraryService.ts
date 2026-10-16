@@ -2,27 +2,12 @@ import { FileSystem, SaveLibraryBooksOptions } from '@/types/system';
 import { Book } from '@/types/book';
 import { getLibraryFilename } from '@/utils/book';
 import { safeLoadJSON, safeSaveJSON } from './persistence';
-import { SELFHOSTED } from '@/utils/supabase';
-import { jwtToUser } from './selfhostedAuth';
 
 const COVER_CONCURRENCY = 20;
 
-// SELFHOSTED (fork): the account scope the on-disk shelf was last loaded or
-// saved for. The in-memory library store can lag behind a login/logout until
-// the shelf is re-read, so sync paths consult `isShelfScopeCurrent` before
-// pushing or merging — otherwise the previous scope's books ride into the new
-// account (the store still holds them at the instant the user flips).
-let shelfScope: string | null | undefined = undefined;
-
-export const setShelfScope = (userId: string | null | undefined) => {
-  shelfScope = userId ?? null;
-};
-
-export const isShelfScopeCurrent = (): boolean => {
-  if (!SELFHOSTED || typeof window === 'undefined') return true;
-  const uid = jwtToUser(localStorage.getItem('token'))?.id ?? null;
-  return shelfScope === uid;
-};
+// SELFHOSTED (fork): shelf-scope tracking lives in libs/selfhost/shelfScope.ts;
+// the optional `userId` params below thread the account-scoped filename
+// (`library_<uid>.json`) through the funnel.
 
 async function processInBatches<T>(
   items: T[],

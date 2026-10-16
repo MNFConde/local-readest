@@ -19,6 +19,9 @@ vi.mock('@/utils/misc', async (importOriginal) => {
 
 vi.mock('@/services/environment', () => ({
   isPWA: vi.fn().mockReturnValue(false),
+  // libraryStore (pulled in via libs/selfhost/shelfScope) needs this at
+  // module init.
+  isTauriAppPlatform: vi.fn().mockReturnValue(false),
 }));
 
 // Mock settingsService, bookService, etc. to avoid deep deps

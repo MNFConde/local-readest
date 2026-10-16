@@ -44,8 +44,8 @@ import { getCurrentWebview } from '@tauri-apps/api/webview';
 
 import { useEnv } from '@/context/EnvContext';
 import { useAuth } from '@/context/AuthContext';
-import { isShelfScopeCurrent } from '@/services/libraryService';
-import { SELFHOSTED } from '@/utils/supabase';
+// SELFHOSTED (fork): account-scoped shelf — scope checks + reload hook.
+import { isShelfScopeCurrent, useShelfScopeReload } from '@/libs/selfhost/shelfScope';
 import { useThemeStore } from '@/store/themeStore';
 import { useTranslation } from '@/hooks/useTranslation';
 import { useLibraryStore } from '@/store/libraryStore';
@@ -702,30 +702,9 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
     return params.toString();
   })();
 
-  // SELFHOSTED (fork): the on-disk shelf switches with the signed-in account,
-  // and a login/logout can land while this page stays mounted (in-app login
-  // dialog, logout from settings). Re-read the shelf on scope change so the
-  // new account's books show; without it the previous scope's shelf lingers
-  // until a remount. The store's initial value matches the first render, so
-  // the effect only fires on real transitions — the cold load is initLibrary's.
-  const scopedUserId = SELFHOSTED ? (user?.id ?? null) : null;
-  const prevScopedUserIdRef = useRef<string | null>(scopedUserId);
-  useEffect(() => {
-    if (prevScopedUserIdRef.current === scopedUserId) return;
-    prevScopedUserIdRef.current = scopedUserId;
-    let cancelled = false;
-    const reloadShelf = async () => {
-      const appService = await envConfig.getAppService();
-      const library = await appService.loadLibraryBooks();
-      if (!cancelled) setLibrary(library);
-    };
-    reloadShelf().catch((error) =>
-      console.error('Failed to reload the shelf after account switch:', error),
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [scopedUserId, envConfig, setLibrary]);
+  // SELFHOSTED (fork): re-read the shelf when the signed-in account changes
+  // while this page stays mounted (logic in libs/selfhost/shelfScope.ts).
+  useShelfScopeReload();
 
   useEffect(() => {
     if (pendingNavigationBookIds) {

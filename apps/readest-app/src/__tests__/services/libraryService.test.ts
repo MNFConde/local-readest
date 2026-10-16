@@ -81,7 +81,7 @@ describe('shelf-scope tracker', () => {
   });
 
   test('outside self-hosted mode the gate is always open', async () => {
-    const { setShelfScope, isShelfScopeCurrent } = await import('@/services/libraryService');
+    const { setShelfScope, isShelfScopeCurrent } = await import('@/libs/selfhost/shelfScope');
     setShelfScope('uid-a');
     expect(isShelfScopeCurrent()).toBe(true);
   });
@@ -89,7 +89,7 @@ describe('shelf-scope tracker', () => {
   test('in self-hosted mode the shelf must match the signed-in account', async () => {
     vi.stubEnv('NEXT_PUBLIC_SELFHOSTED', '1');
     vi.resetModules();
-    const { setShelfScope, isShelfScopeCurrent } = await import('@/services/libraryService');
+    const { setShelfScope, isShelfScopeCurrent } = await import('@/libs/selfhost/shelfScope');
 
     const token = `x.${btoa(JSON.stringify({ sub: 'uid-a' }))}.sig`;
     localStorage.setItem('token', token);
