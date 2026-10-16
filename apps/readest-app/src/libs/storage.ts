@@ -1,37 +1,22 @@
-import { getAPIBaseUrl, getBaseUrl, isWebAppPlatform } from '@/services/environment';
+import { getAPIBaseUrl, isWebAppPlatform } from '@/services/environment';
 import { AppService } from '@/types/system';
-import { getAccessToken, getUserID } from '@/utils/access';
+import { getUserID } from '@/utils/access';
 import { fetchWithAuth } from '@/utils/fetch';
+import { ProgressHandler, ProgressPayload } from '@/utils/transfer';
+// SELFHOSTED (fork): the transfer primitives are swapped for the self-host
+// aware adapters in libs/selfhost/transferAdapters (path-only blob URL
+// absolutizing + Bearer header); every call site below stays upstream text.
 import {
   tauriUpload,
   tauriDownload,
   webUpload,
   webDownload,
-  ProgressHandler,
-  ProgressPayload,
-} from '@/utils/transfer';
+} from '@/libs/selfhost/transferAdapters';
 
-const toFullUrl = (url: string) => {
-  if (/^https?:\/\//i.test(url)) return url;
-  const base = getBaseUrl().replace(/\/+$/, '');
-  if (url.startsWith('/')) return `${base}${url}`;
-  return `${base}/${url}`;
-};
-
-/**
- * Signed URLs (R2/S3 pre-signed) carry their own credentials and must NOT
- * get an Authorization header. Path-only blob URLs from a self-hosted
- * server's LocalDiskStore need the Bearer token instead.
- */
-const buildBlobAuthHeaders = async (url: string): Promise<Record<string, string>> => {
-  if (/^https?:\/\//i.test(url)) return {};
-  const token = await getAccessToken();
-  return token ? { Authorization: `Bearer ${token}` } : {};
-};
-
-// Resolved lazily via getters: in self-hosted mode the server URL is entered
-// at login and persisted in localStorage, which happens AFTER this module is
-// first imported on web — a module-load constant would pin web.readest.com.
+// SELFHOSTED (fork): resolved lazily via getters — in self-hosted mode the
+// server URL is entered at login and persisted in localStorage, which happens
+// AFTER this module is first imported on web; a module-load constant would
+// pin web.readest.com.
 const API_ENDPOINTS = {
   get upload() {
     return getAPIBaseUrl() + '/storage/upload';
@@ -97,11 +82,10 @@ export const uploadFile = async (
 
     const { uploadUrl, downloadUrl }: { uploadUrl: string; downloadUrl?: string } =
       await response.json();
-    const blobHeaders = await buildBlobAuthHeaders(uploadUrl);
     if (isWebAppPlatform()) {
-      await webUpload(file, toFullUrl(uploadUrl), onProgress, blobHeaders);
+      await webUpload(file, uploadUrl, onProgress);
     } else {
-      await tauriUpload(toFullUrl(uploadUrl), fileFullPath, 'PUT', onProgress, blobHeaders);
+      await tauriUpload(uploadUrl, fileFullPath, 'PUT', onProgress);
     }
     return temp || media ? downloadUrl : undefined;
   } catch (error) {
@@ -142,11 +126,10 @@ export const uploadReplicaFile = async (
     });
 
     const { uploadUrl }: { uploadUrl: string } = await response.json();
-    const blobHeaders = await buildBlobAuthHeaders(uploadUrl);
     if (isWebAppPlatform()) {
-      await webUpload(file, toFullUrl(uploadUrl), onProgress, blobHeaders);
+      await webUpload(file, uploadUrl, onProgress);
     } else {
-      await tauriUpload(toFullUrl(uploadUrl), fileFullPath, 'PUT', onProgress, blobHeaders);
+      await tauriUpload(uploadUrl, fileFullPath, 'PUT', onProgress);
     }
   } catch (error) {
     console.error('Replica file upload failed:', error);
@@ -230,22 +213,20 @@ export const downloadFile = async ({
       throw new Error('No download URL available');
     }
 
-    const blobAuthHeaders = await buildBlobAuthHeaders(downloadUrl);
-    const mergedHeaders = { ...blobAuthHeaders, ...headers };
     if (isWebAppPlatform()) {
       const { headers: responseHeaders, blob } = await webDownload(
-        toFullUrl(downloadUrl),
+        downloadUrl,
         onProgress,
-        mergedHeaders,
+        headers,
       );
       await appService.writeFile(dst, 'None', await blob.arrayBuffer());
       return responseHeaders;
     } else {
       return await tauriDownload(
-        toFullUrl(downloadUrl),
+        downloadUrl,
         dst,
         onProgress,
-        mergedHeaders,
+        headers,
         undefined,
         singleThreaded,
         skipSslVerification,
