@@ -66,7 +66,6 @@ sync-server/data/
 .openbitfun/
 
 # local-only workspace files (cairn/zcode layer, self-host dev env, build logs)
-/AGENTS.md
 /.zcodeignore
 apps/readest-app/.env.server
 *.log

@@ -1,3 +1,5 @@
+> FORK(selfhosted): 本目录改动纪律见 [selfhost-agent.md](./selfhost-agent.md),动任何上游共享文件前必读。
+
 ## Project Overview
 
 Readest is a cross-platform ebook reader built as a **Next.js 16 + Tauri v2** hybrid app. It's part of a pnpm monorepo at `/apps/readest-app/`. The app runs on web (CloudFlare Workers), desktop (macOS/Windows/Linux via Tauri), and mobile (iOS/Android via Tauri).

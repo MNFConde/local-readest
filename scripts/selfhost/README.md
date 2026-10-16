@@ -33,3 +33,11 @@ node scripts/selfhost/android-spotcheck.js 9222 10.0.2.2:8080 <登录码> 流架
 ## cdp-login.js — 最早的登录闭环脚本（保留备查）
 
 模拟器/桌面自托管登录自动化（填 server-url + 登录码 → 断言 JWT 落 localStorage）。
+
+## 临时脚本台账(三次法则)
+
+规则:同一分析/验证逻辑第 3 次出现必须固化进本目录并在此登记;固化后只准扩展,禁止另写。一次性诊断探针也须登记(日期/用途/次数),跨会话累计 3 次同样固化。细则见 `docs/selfhosted/contributing.md`。
+
+| 日期 | 脚本/探针 | 用途 | 次数 | 状态 |
+|---|---|---|---|---|
+| 2026-10-16 | check-decoupling.mjs | 解耦守卫:translation.json 零 diff + 共享文件预算(CI 同源) | 固化 | ✅ 固化 |
