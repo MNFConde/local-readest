@@ -154,8 +154,12 @@ step('copy public assets', () =>
 // bsdtar -h materializes symlinks but ships junction-style reparse points
 // verbatim, and on the CI runner the extracted .pnpm then contains entries
 // stat can't even touch (EPERM) — which is also what natively crashed the
-// earlier cpSync(dereference) pass. On the source side every link resolves
-// against the build machine, so flatten is a plain walk of real content.
+// earlier cpSync(dereference) pass. Even the source tree's INTERIOR alias
+// links (pnpm's per-dependency pointers into sibling store entries) stat as
+// EPERM on the runner — but by construction they are redundant: every alias
+// target is a store entry of its own that the walk below copies directly.
+// So unreadable aliases are skipped with a warning; real content still
+// reaches the flat root through its own entry.
 const srcStore = path.join(inputs.standalone, 'node_modules', '.pnpm');
 const flatRoot = path.join(outDir, 'web', 'node_modules');
 if (!existsSync(srcStore)) {
@@ -204,31 +208,39 @@ step('flatten .pnpm store into plain node_modules (from source)', () => {
         continue; // unreadable even at the source: nothing sane to ship
       }
       if (!stat.isDirectory()) continue;
-      flattenPackageDir(from, path.join(flatRoot, name));
+      try {
+        flattenPackageDir(from, path.join(flatRoot, name));
+      } catch (error) {
+        // Interior alias link the runner refuses to stat (EPERM). Its target
+        // is a store entry of its own, copied when that entry is walked.
+        console.warn(`[bundle] skipping unreadable store entry ${from}: ${error?.code ?? error}`);
+      }
     }
   }
 });
 // The extracted copy's app-scoped node_modules is links/reparse points into
 // the (now deleted) .pnpm tree. Rebuild it from the flat root, restricted to
-// the packages the standalone's app scope actually listed.
+// the packages the standalone's app scope actually listed. Every app-scoped
+// dependency must resolve to a flat-root package — one missing here means a
+// web server that crashes on first require, so that is a hard stop, not a
+// warning.
 step('rebuild app-scoped node_modules as real dirs', () => {
   const appNm = path.join(outDir, 'web', 'apps', 'readest-app', 'node_modules');
   rmSync(appNm, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
   mkdirSync(appNm, { recursive: true });
   const srcAppNm = path.join(inputs.standalone, 'apps', 'readest-app', 'node_modules');
+  const missing = [];
   for (const name of readdirSync(srcAppNm)) {
     if (name === '.bin' || name === '.pnpm') continue;
     const flat = path.join(flatRoot, name);
-    if (existsSync(flat)) {
-      cpSync(flat, path.join(appNm, name), { recursive: true, dereference: true });
-    } else {
-      // Package listed at app scope but not hoisted to the flat root — take
-      // it straight from the source, dereferencing against the build machine.
-      cpSync(path.join(srcAppNm, name), path.join(appNm, name), {
-        recursive: true,
-        dereference: true,
-      });
+    if (!existsSync(flat)) {
+      missing.push(name);
+      continue;
     }
+    cpSync(flat, path.join(appNm, name), { recursive: true, dereference: true });
+  }
+  if (missing.length > 0) {
+    die(`app-scoped packages missing from the flat root: ${missing.join(', ')}`);
   }
 });
 step('copy exes', () => {
