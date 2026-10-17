@@ -79,27 +79,44 @@ if (!existsSync(path.join(inputs.standalone, 'apps', 'readest-app', 'server.js')
 const { version } = JSON.parse(readFileSync(path.join(appDir, 'package.json'), 'utf8'));
 
 console.log(`Assembling self-host server bundle (v${version}) into ${outDir}`);
-try {
-  rmSync(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
-} catch {
-  // A previous start.bat still running from this directory holds the dir
-  // lock; say so instead of leaking a bare EPERM.
-  die(`${outDir} is locked — stop the running bundle first (stop.bat in it)`);
-}
-mkdirSync(outDir, { recursive: true });
+// Phased logging + full-stack die(): this script runs unattended in CI, and a
+// phase that dies silently (exit 127 with no output, as on the 0.12.14-2026101712
+// runner) is undebuggable — every step below must be attributable in the log.
+const step = (name, fn) => {
+  console.log(`[bundle] ${name}...`);
+  try {
+    fn();
+  } catch (error) {
+    die(`${name} failed: ${error?.stack ?? error}`);
+  }
+};
+
+step('clear previous output', () => {
+  try {
+    rmSync(outDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
+  } catch {
+    // A previous start.bat still running from this directory holds the dir
+    // lock; say so instead of leaking a bare EPERM.
+    die(`${outDir} is locked — stop the running bundle first (stop.bat in it)`);
+  }
+  mkdirSync(outDir, { recursive: true });
+});
 
 // The web server: standalone tree + the traced static/public assets Next does
 // not include. Same layout the Docker image assembles (see Dockerfile).
-//
-// The web server: standalone tree + the traced static/public assets Next does
-// not include. Same layout the Docker image assembles (see Dockerfile).
-cpSync(inputs.standalone, path.join(outDir, 'web'), { recursive: true, dereference: true });
-cpSync(inputs.staticDir, path.join(outDir, 'web', 'apps', 'readest-app', '.next', 'static'), {
-  recursive: true,
-});
-cpSync(inputs.publicDir, path.join(outDir, 'web', 'apps', 'readest-app', 'public'), {
-  recursive: true,
-});
+step('copy standalone web tree (junctions dereferenced — the slow one)', () =>
+  cpSync(inputs.standalone, path.join(outDir, 'web'), { recursive: true, dereference: true }),
+);
+step('copy static assets', () =>
+  cpSync(inputs.staticDir, path.join(outDir, 'web', 'apps', 'readest-app', '.next', 'static'), {
+    recursive: true,
+  }),
+);
+step('copy public assets', () =>
+  cpSync(inputs.publicDir, path.join(outDir, 'web', 'apps', 'readest-app', 'public'), {
+    recursive: true,
+  }),
+);
 
 // The dereferenced copy above materializes pnpm's junctions, which breaks
 // the store's sibling-resolution shape (a flattened `next/` no longer finds
@@ -111,6 +128,10 @@ cpSync(inputs.publicDir, path.join(outDir, 'web', 'apps', 'readest-app', 'public
 // First store entry wins on version collisions, like npm hoisting.
 const storeDir = path.join(outDir, 'web', 'node_modules', '.pnpm');
 const flatRoot = path.join(outDir, 'web', 'node_modules');
+if (!existsSync(storeDir)) {
+  die(`no .pnpm store under ${flatRoot} — pnpm's standalone node_modules layout changed; ` +
+    'the flatten step below would silently do nothing and the zip would dangle');
+}
 const flattenPackageDir = (from, to) => {
   // Scoped names hit this twice: the `@scope` dir is merged per child so a
   // second store entry contributing another package under the same scope
@@ -127,6 +148,7 @@ const flattenPackageDir = (from, to) => {
   if (existsSync(to)) return;
   cpSync(from, to, { recursive: true, dereference: true });
 };
+step('flatten .pnpm store into plain node_modules', () => {
 for (const storeEntry of readdirSync(storeDir)) {
   // `storeEntry` is either `<name>@<version>[<peer-hash>]` or the store's own
   // hoisted-fallback `node_modules` directory.
@@ -148,8 +170,11 @@ for (const storeEntry of readdirSync(storeDir)) {
   }
 }
 rmSync(storeDir, { recursive: true, force: true });
-copyFileSync(inputs.serverExe, path.join(outDir, 'sync-server.exe'));
-copyFileSync(inputs.supervisorExe, path.join(outDir, 'readest-supervisor.exe'));
+});
+step('copy exes', () => {
+  copyFileSync(inputs.serverExe, path.join(outDir, 'sync-server.exe'));
+  copyFileSync(inputs.supervisorExe, path.join(outDir, 'readest-supervisor.exe'));
+});
 
 const CRLF = (s) => s.replace(/\n/g, '\r\n') + '\r\n';
 
@@ -258,7 +283,14 @@ if (zipIt) {
   const cmd = existsSync(bsdtar)
     ? `"${bsdtar}" -a -c -f "${zipPath}" -C "${path.dirname(outDir)}" "${path.basename(outDir)}"`
     : `powershell -NoProfile -Command "Compress-Archive -Path '${outDir}' -DestinationPath '${zipPath}' -Force"`;
-  execSync(cmd, { stdio: 'inherit' });
+  step(`zip bundle via ${existsSync(bsdtar) ? 'bsdtar' : 'Compress-Archive'}`, () => {
+    try {
+      execSync(cmd, { stdio: 'inherit' });
+    } catch (error) {
+      die(`zip command failed (status ${error?.status}): ${error?.stack ?? error}`);
+    }
+    if (!existsSync(zipPath)) die(`zip command reported success but ${zipPath} is missing`);
+  });
 }
 
 console.log('Bundle ready:');

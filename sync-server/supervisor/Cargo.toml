@@ -1,6 +1,6 @@
 [package]
 name = "readest-supervisor"
-version = "0.12.14"
+version = "0.12.14-2026101712"
 edition = "2021"
 description = "Process supervisor + dashboard for the self-hosted Readest server bundle: spawns sync-server and the web reader, restarts them with backoff, and keeps them alive only as long as itself"
 license = "AGPL-3.0"
