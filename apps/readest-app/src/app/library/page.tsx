@@ -45,7 +45,8 @@ import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { useEnv } from '@/context/EnvContext';
 import { useAuth } from '@/context/AuthContext';
 // SELFHOSTED (fork): account-scoped shelf — scope checks + reload hook.
-import { isShelfScopeCurrent, useShelfScopeReload } from '@/libs/selfhost/shelfScope';
+import { isShelfScopeCurrent } from '@/libs/selfhost/shelfScope';
+import { useShelfScopeReload } from '@/libs/selfhost/useShelfScopeReload';
 import { useThemeStore } from '@/store/themeStore';
 import { useTranslation } from '@/hooks/useTranslation';
 import { useLibraryStore } from '@/store/libraryStore';
