@@ -143,19 +143,24 @@ step('copy public assets', () =>
   }),
 );
 
-// The dereferenced copy above materializes pnpm's junctions, which breaks
-// the store's sibling-resolution shape (a flattened `next/` no longer finds
-// @swc/helpers beside it in the store). Flatten the store into a plain
-// npm-style `node_modules` so the Node resolver can walk its way to every
-// transitive dep from anywhere in the tree — and so the release zip holds
-// real files only: Explorer/tar cannot recreate junctions without admin or
-// Developer Mode, so any link shipped in the zip dangles for most users.
-// First store entry wins on version collisions, like npm hoisting.
-const storeDir = path.join(outDir, 'web', 'node_modules', '.pnpm');
+// Flatten the store into a plain npm-style `node_modules` so the Node
+// resolver can walk its way to every transitive dep from anywhere in the
+// tree — and so the release zip holds real files only: Explorer/tar cannot
+// recreate junctions without admin or Developer Mode, so any link shipped
+// in the zip dangles for most users. First store entry wins on version
+// collisions, like npm hoisting.
+//
+// Read from the SOURCE standalone tree, never from the extracted copy:
+// bsdtar -h materializes symlinks but ships junction-style reparse points
+// verbatim, and on the CI runner the extracted .pnpm then contains entries
+// stat can't even touch (EPERM) — which is also what natively crashed the
+// earlier cpSync(dereference) pass. On the source side every link resolves
+// against the build machine, so flatten is a plain walk of real content.
+const srcStore = path.join(inputs.standalone, 'node_modules', '.pnpm');
 const flatRoot = path.join(outDir, 'web', 'node_modules');
-if (!existsSync(storeDir)) {
-  die(`no .pnpm store under ${flatRoot} — pnpm's standalone node_modules layout changed; ` +
-    'the flatten step below would silently do nothing and the zip would dangle');
+if (!existsSync(srcStore)) {
+  die(`no .pnpm store under ${inputs.standalone}/node_modules — pnpm's standalone ` +
+    'node_modules layout changed; the flatten step would ship a tree that cannot resolve');
 }
 const flattenPackageDir = (from, to) => {
   // Scoped names hit this twice: the `@scope` dir is merged per child so a
@@ -173,28 +178,58 @@ const flattenPackageDir = (from, to) => {
   if (existsSync(to)) return;
   cpSync(from, to, { recursive: true, dereference: true });
 };
-step('flatten .pnpm store into plain node_modules', () => {
-for (const storeEntry of readdirSync(storeDir)) {
-  // `storeEntry` is either `<name>@<version>[<peer-hash>]` or the store's own
-  // hoisted-fallback `node_modules` directory.
-  const pkgsDir =
-    storeEntry === 'node_modules'
-      ? path.join(storeDir, storeEntry)
-      : path.join(storeDir, storeEntry, 'node_modules');
-  let names;
-  try {
-    names = readdirSync(pkgsDir);
-  } catch {
-    continue;
+step('flatten .pnpm store into plain node_modules (from source)', () => {
+  rmSync(flatRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
+  mkdirSync(flatRoot, { recursive: true });
+  for (const storeEntry of readdirSync(srcStore)) {
+    // `storeEntry` is either `<name>@<version>[<peer-hash>]` or the store's
+    // own hoisted-fallback `node_modules` directory.
+    const pkgsDir =
+      storeEntry === 'node_modules'
+        ? path.join(srcStore, storeEntry)
+        : path.join(srcStore, storeEntry, 'node_modules');
+    let names;
+    try {
+      names = readdirSync(pkgsDir);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (name === '.bin') continue;
+      const from = path.join(pkgsDir, name);
+      let stat;
+      try {
+        stat = statSync(from);
+      } catch {
+        continue; // unreadable even at the source: nothing sane to ship
+      }
+      if (!stat.isDirectory()) continue;
+      flattenPackageDir(from, path.join(flatRoot, name));
+    }
   }
-  for (const name of names) {
-    if (name === '.bin') continue;
-    const from = path.join(pkgsDir, name);
-    if (!statSync(from).isDirectory()) continue;
-    flattenPackageDir(from, path.join(flatRoot, name));
+});
+// The extracted copy's app-scoped node_modules is links/reparse points into
+// the (now deleted) .pnpm tree. Rebuild it from the flat root, restricted to
+// the packages the standalone's app scope actually listed.
+step('rebuild app-scoped node_modules as real dirs', () => {
+  const appNm = path.join(outDir, 'web', 'apps', 'readest-app', 'node_modules');
+  rmSync(appNm, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
+  mkdirSync(appNm, { recursive: true });
+  const srcAppNm = path.join(inputs.standalone, 'apps', 'readest-app', 'node_modules');
+  for (const name of readdirSync(srcAppNm)) {
+    if (name === '.bin' || name === '.pnpm') continue;
+    const flat = path.join(flatRoot, name);
+    if (existsSync(flat)) {
+      cpSync(flat, path.join(appNm, name), { recursive: true, dereference: true });
+    } else {
+      // Package listed at app scope but not hoisted to the flat root — take
+      // it straight from the source, dereferencing against the build machine.
+      cpSync(path.join(srcAppNm, name), path.join(appNm, name), {
+        recursive: true,
+        dereference: true,
+      });
+    }
   }
-}
-rmSync(storeDir, { recursive: true, force: true });
 });
 step('copy exes', () => {
   copyFileSync(inputs.serverExe, path.join(outDir, 'sync-server.exe'));
