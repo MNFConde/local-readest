@@ -3,6 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const getClaimsMock = vi.hoisted(() => vi.fn());
 const getUserMock = vi.hoisted(() => vi.fn());
 vi.mock('@/utils/supabase', () => ({
+  // SELFHOSTED (fork): access.ts reads this flag at call time; without it the
+  // mock rejects the export read before the official getClaims path runs.
+  SELFHOSTED: false,
   supabase: { auth: { getClaims: getClaimsMock, getUser: getUserMock } },
 }));
 
