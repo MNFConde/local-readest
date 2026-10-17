@@ -25,7 +25,7 @@ cd apps/readest-app && pnpm install && pnpm lint && pnpm test   # 冒烟闸
 
 ## 发布与版本号
 
-- **唯一版本真源**:`apps/readest-app/package.json`(`tauri.conf.json` 引用它,`release-selfhost.yml` 从这里读版本);`sync-server/Cargo.toml` 与之同步改,并提交随之更新的 `Cargo.lock`。
+- **唯一版本真源**:`apps/readest-app/package.json`(`tauri.conf.json` 引用它,`release-selfhost.yml` 从这里读版本);Rust 侧**两个 crate** 随之同步改版本,并各自提交更新的 `Cargo.lock`:`sync-server/Cargo.toml` + `sync-server/supervisor/Cargo.toml`(supervisor 的 metrics 上报与 bundle README 都读它)。
 - **正式版直接用上游版本号**:合并上游后按上游当前号发版(上游 0.12.16 → `v0.12.16`),不自造 +1——更新链只看自家 latest.json,上游号在本线内天然严格递增。
 - **合并上游前的中间版 = 戳版** `<主体>-<YYYYMMDDHH>`(如 `0.12.14-2026101712`):比较器(`apps/readest-app/src/utils/version.ts` 及其 Rust 镜像)把「纯 10 位数字预发布号」识别为同主体更新,且同主体上戳版 > 正式版;戳精确到小时,同一小时第二次发布手动加一。
 - **发布动作**:bump 版本提交 → push → `git tag -a v<版本> && git push origin v<版本>`(触发 `release-selfhost.yml`)→ 盯流水线全绿。release 由 `gh release create` 创建(无 `--prerelease`),自动成为 `releases/latest/download/latest.json` 更新源;戳版首次进 stable 通道需冒烟验证桌面/安卓更新链。
