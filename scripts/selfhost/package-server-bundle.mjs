@@ -27,7 +27,7 @@
  *         (the same name the release-selfhost pipeline attaches to releases).
  */
 
-import { execSync } from 'node:child_process';
+import { execSync, spawnSync } from 'node:child_process';
 import {
   copyFileSync,
   cpSync,
@@ -104,9 +104,28 @@ step('clear previous output', () => {
 
 // The web server: standalone tree + the traced static/public assets Next does
 // not include. Same layout the Docker image assembles (see Dockerfile).
-step('copy standalone web tree (junctions dereferenced — the slow one)', () =>
-  cpSync(inputs.standalone, path.join(outDir, 'web'), { recursive: true, dereference: true }),
-);
+//
+// The standalone tree is full of pnpm symlinks/junctions into the build
+// machine's store, and the copy must materialize them as real files (the
+// release zip cannot carry links). Node's cpSync(dereference) crashed the
+// process natively on the CI runner (silent exit 127 two seconds in, twice,
+// while the identical script passed locally) — robocopy does the same job
+// with native iterative traversal and follows links by default. Exit codes
+// 0-7 are success (bitmask: 1 copied, 2 extras, 4 mismatches); >=8 is real.
+step('copy standalone web tree (robocopy follows pnpm links)', () => {
+  const robocopy = path.join(process.env.WINDIR ?? 'C:\\Windows', 'System32', 'Robocopy.exe');
+  const result = spawnSync(
+    existsSync(robocopy) ? robocopy : 'robocopy',
+    [inputs.standalone, path.join(outDir, 'web'), '/E', '/MT:16', '/R:2', '/W:2',
+      '/NFL', '/NDL', '/NJH', '/NJS', '/NP'],
+    { encoding: 'utf8' },
+  );
+  if (result.error) die(`robocopy failed to start: ${result.error.stack}`);
+  if ((result.status ?? 8) >= 8) {
+    die(`robocopy exited ${result.status}:\n${(result.stdout ?? '').split('\n').slice(-30).join('\n')}`);
+  }
+  console.log(`[bundle] robocopy exited ${result.status} (0-7 is success)`);
+});
 step('copy static assets', () =>
   cpSync(inputs.staticDir, path.join(outDir, 'web', 'apps', 'readest-app', '.next', 'static'), {
     recursive: true,
