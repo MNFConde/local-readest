@@ -23,6 +23,16 @@ cd apps/readest-app && pnpm install && pnpm lint && pnpm test   # 冒烟闸
 - 冲突预期集中在共享文件的 SELFHOSTED 接缝行与 `package.json`/CI 等小文件;`apps/readest-app/AGENTS.md` 冲突的解法恒为**保留顶部 FORK 指针**。
 - 合并前后各跑一次 `pnpm check:decoupling`,确认预算没有被合并意外撑爆。
 
+## 发布与版本号
+
+- **唯一版本真源**:`apps/readest-app/package.json`(`tauri.conf.json` 引用它,`release-selfhost.yml` 从这里读版本);`sync-server/Cargo.toml` 与之同步改,并提交随之更新的 `Cargo.lock`。
+- **正式版直接用上游版本号**:合并上游后按上游当前号发版(上游 0.12.16 → `v0.12.16`),不自造 +1——更新链只看自家 latest.json,上游号在本线内天然严格递增。
+- **合并上游前的中间版 = 戳版** `<主体>-<YYYYMMDDHH>`(如 `0.12.14-2026101712`):比较器(`apps/readest-app/src/utils/version.ts` 及其 Rust 镜像)把「纯 10 位数字预发布号」识别为同主体更新,且同主体上戳版 > 正式版;戳精确到小时,同一小时第二次发布手动加一。
+- **发布动作**:bump 版本提交 → push → `git tag -a v<版本> && git push origin v<版本>`(触发 `release-selfhost.yml`)→ 盯流水线全绿。release 由 `gh release create` 创建(无 `--prerelease`),自动成为 `releases/latest/download/latest.json` 更新源;戳版首次进 stable 通道需冒烟验证桌面/安卓更新链。
+- **fetch 纪律**:`git fetch official` 不拉 tags(`remote.official` 只配分支引用),避免上游未来同名 tag 与自推 `v` 同名冲突。
+- **既成事实**:`v0.12.13`/`v0.12.14` 为纯 fork 号,与上游同名版本无对应;0.12.13 曾因 CI env 漏 `NEXT_PUBLIC_SELFHOSTED=1` 静默出标准构建——发版前按「UI 里有编译期门」的清单核对流水线 env。
+- **记录惯例**:每次正式发布后在本地 cairn LOG 记一行映射「我们的 X ≈ 上游 Y + fork 改动」(cairn 不随 clone 走)。
+
 ## 新机器初始化
 
 ```bash
