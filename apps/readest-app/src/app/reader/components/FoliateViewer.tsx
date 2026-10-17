@@ -114,6 +114,7 @@ import ImageContextMenu from './ImageContextMenu';
 import TableViewer from './TableViewer';
 import ExternalLinkConfirm from './ExternalLinkConfirm';
 import { getTTSMiniPlayerClearance } from '../utils/ttsMiniPlayerPosition';
+import { getDrawingDockClearance } from '../utils/drawingDock';
 
 declare global {
   interface Window {
@@ -177,9 +178,18 @@ const FoliateViewer: React.FC<{
   const { registerSpeedListeners, overlayVisible: speedOverlayVisible } =
     useAutoScrollSpeedGesture(autoScroll);
 
+  // The book document outlives this view: bookDataStore keeps it for the next
+  // open, so listeners left on its transformTarget would keep the closed view,
+  // its iframes and their listeners alive, one more set per open (#6710).
+  const removeTransformListenersRef = useRef<(() => void) | null>(null);
+  const unmountedRef = useRef(false);
+
   // A pending anti-flash timer must not fire setNavigating on an unmounted component.
   useEffect(() => {
+    unmountedRef.current = false;
     return () => {
+      unmountedRef.current = true;
+      removeTransformListenersRef.current?.();
       if (navSpinnerTimerRef.current) clearTimeout(navSpinnerTimerRef.current);
       if (librarySearchHighlightTimerRef.current) {
         clearTimeout(librarySearchHighlightTimerRef.current);
@@ -762,7 +772,7 @@ const FoliateViewer: React.FC<{
 
       const { book } = view;
 
-      book.transformTarget?.addEventListener('load', async (event: Event) => {
+      const handleTransformLoad = async (event: Event) => {
         const { detail } = event as CustomEvent<{
           isScript: boolean;
           type: string;
@@ -788,12 +798,20 @@ const FoliateViewer: React.FC<{
             }
           });
         }
-      });
+      };
       const viewWidth = appService?.isMobile ? screen.width : window.innerWidth;
       const viewHeight = appService?.isMobile ? screen.height : window.innerHeight;
       const width = viewWidth - insets.left - insets.right;
       const height = viewHeight - insets.top - insets.bottom;
-      book.transformTarget?.addEventListener('data', getDocTransformHandler({ width, height }));
+      const handleTransformData = getDocTransformHandler({ width, height });
+      book.transformTarget?.addEventListener('load', handleTransformLoad);
+      book.transformTarget?.addEventListener('data', handleTransformData);
+      removeTransformListenersRef.current = () => {
+        book.transformTarget?.removeEventListener('load', handleTransformLoad);
+        book.transformTarget?.removeEventListener('data', handleTransformData);
+      };
+      // The reader can close while view.open() is pending; its cleanup has run.
+      if (unmountedRef.current) removeTransformListenersRef.current();
       view.renderer.setStyles?.(getStyles(viewSettings, undefined, getLoadedFonts()));
       applyTranslationStyle(viewSettings);
 
@@ -919,6 +937,9 @@ const FoliateViewer: React.FC<{
       : Math.max(0, miniPlayerClearance);
     const moreRightInset = showDoubleBorderHeader ? 32 : 0;
     const moreLeftInset = showDoubleBorderFooter ? 32 : 0;
+    // The drawing dock stays up for the whole drawing session, so the text
+    // makes room for it instead of running underneath.
+    const drawingDock = viewState?.drawingEnabled ? getDrawingDockClearance(gridInsets) : null;
     const topMargin = (showTopHeader ? insets.top : viewInsets.top) + moreTopInset;
     // On iPhone Duo the horizontal safe-area insets are applied to the viewer
     // container itself (see the render below), not folded into these margins:
@@ -926,7 +947,10 @@ const FoliateViewer: React.FC<{
     // of it (a quarter in two-column mode) on the outer edge, which left text
     // under the side status strip (#6307). Elsewhere they stay in the margins.
     const rightMargin = (isIPhoneDuo ? viewInsets.right : insets.right) + moreRightInset;
-    const bottomMargin = (showBottomFooter ? insets.bottom : viewInsets.bottom) + moreBottomInset;
+    const bottomMargin = Math.max(
+      (showBottomFooter ? insets.bottom : viewInsets.bottom) + moreBottomInset,
+      drawingDock?.bottom ?? 0,
+    );
     const leftMargin = (isIPhoneDuo ? viewInsets.left : insets.left) + moreLeftInset;
     viewRef.current?.renderer.setAttribute('margin-top', `${topMargin}px`);
     viewRef.current?.renderer.setAttribute('margin-right', `${rightMargin}px`);
@@ -942,9 +966,10 @@ const FoliateViewer: React.FC<{
       // floor, so a negative top margin keeps the scroll viewport glued to the
       // lifted header band instead of running under it (#5303).
       const scrollTop = headerVisible ? topMargin : 0;
-      const scrollBottom = footerVisible
-        ? Math.max(footerBarHeight, miniPlayerClearance)
-        : miniPlayerClearance;
+      const scrollBottom = Math.max(
+        footerVisible ? Math.max(footerBarHeight, miniPlayerClearance) : miniPlayerClearance,
+        drawingDock?.bottom ?? 0,
+      );
       setScrollMargins({ top: bookData?.isFixedLayout ? 0 : scrollTop, bottom: scrollBottom });
     } else {
       setScrollMargins({ top: 0, bottom: 0 });
@@ -969,16 +994,31 @@ const FoliateViewer: React.FC<{
     }
   };
 
+  // The suppression below covers the whole web view, footnote popup included,
+  // where instant highlighting has no hold gesture: a popup selection is made
+  // with the system long-press and highlighted by the quick action (#6804).
+  // The popup's overlay keeps touches off the book while it is open.
+  const [footnotePopupShown, setFootnotePopupShown] = useState(false);
+  useEffect(() => {
+    const onFootnotePopupShown = (event: CustomEvent) => {
+      const detail = event.detail as { key: string; shown: boolean };
+      if (detail.key === bookKey) setFootnotePopupShown(detail.shown);
+    };
+    eventDispatcher.on('footnote-popup-shown', onFootnotePopupShown);
+    return () => eventDispatcher.off('footnote-popup-shown', onFootnotePopupShown);
+  }, [bookKey]);
+
   // iOS: the system long-press selection would race the instant-highlight
   // hold — WebKit consults selectability before any touch handler runs, so
   // JS-level suppression cannot win. Suppress it natively while the highlight
-  // quick action owns the gesture; restore when the mode turns off or the
-  // reader closes.
+  // quick action owns the gesture; restore when the mode turns off, a footnote
+  // popup opens, or the reader closes.
   useEffect(() => {
     if (!appService?.isIOSApp) return;
     const suppressed =
       !!viewSettings?.enableAnnotationQuickActions &&
-      viewSettings?.annotationQuickAction === 'highlight';
+      viewSettings?.annotationQuickAction === 'highlight' &&
+      !footnotePopupShown;
     setSelectionSuppressed({ target: 'gesture', suppressed }).catch(() => {});
     return () => {
       if (suppressed) {
@@ -990,6 +1030,7 @@ const FoliateViewer: React.FC<{
     appService?.isIOSApp,
     viewSettings?.enableAnnotationQuickActions,
     viewSettings?.annotationQuickAction,
+    footnotePopupShown,
   ]);
 
   // Android (#5427): useTextSelector keeps the system selection toolbar
@@ -1143,6 +1184,7 @@ const FoliateViewer: React.FC<{
     viewSettings?.scrolled,
     viewSettings?.noContinuousScroll,
     viewState?.ttsEnabled,
+    viewState?.drawingEnabled,
     // Switching Player Style changes whether a band is reserved at all.
     viewSettings?.ttsPlayerStyle,
     // footerReservesBand inputs: the band must collapse/return live when the

@@ -42,7 +42,9 @@ export const useNotesSync = (bookKey: string) => {
 
     const enriched: BookNote[] = [];
     for (const note of notes) {
-      if (note.cfi && !note.xpointer0) {
+      // KOReader turns any pulled note with an xpointer into a highlight, so a
+      // drawing never gets one; without it every plugin version skips it.
+      if (note.type !== 'ink' && note.cfi && !note.xpointer0) {
         try {
           const contents = view.renderer.getContents();
           const primaryIndex = view.renderer.primaryIndex;
@@ -141,9 +143,11 @@ export const useNotesSync = (bookKey: string) => {
     if (!config?.location || !book || !user) return {};
 
     const bookNotes = config.booknotes ?? [];
+    // A note without an xpointer is pushed until it gets one; a drawing never
+    // does (see populateXPointersForPush), so it goes only when it changed.
     const newNotes = bookNotes.filter(
       (note) =>
-        !note.xpointer0 ||
+        (!note.xpointer0 && note.type !== 'ink') ||
         lastSyncedAtNotes < note.updatedAt ||
         lastSyncedAtNotes < (note.deletedAt ?? 0),
     );
@@ -172,7 +176,10 @@ export const useNotesSync = (bookKey: string) => {
         }
       },
       SYNC_NOTES_INTERVAL_SEC * 1000,
-      { emitLast: false },
+      // A highlight made inside the interval must still go out once it ends:
+      // without the trailing call it waited for the next highlight or for the
+      // book to be reopened on this device (#6762).
+      { emitLast: true },
     ),
     [syncNotes],
   );
