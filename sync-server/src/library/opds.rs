@@ -50,12 +50,19 @@ fn challenge() -> Response {
     resp
 }
 
+// Axum handler style: the Err side is a ready-to-return 401 Response so every
+// caller can use `?` straight into a Response-returning handler.
+#[allow(clippy::result_large_err)]
 fn basic_user(state: &SharedState, headers: &HeaderMap) -> Result<User, Response> {
     let credentials = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Basic "))
-        .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64.trim()).ok())
+        .and_then(|b64| {
+            base64::engine::general_purpose::STANDARD
+                .decode(b64.trim())
+                .ok()
+        })
         .and_then(|raw| String::from_utf8(raw).ok())
         .and_then(|v| {
             v.split_once(':')
@@ -364,7 +371,10 @@ fn entry_xml(row: &CatalogRow, holders: &[Holder]) -> String {
     let author = if row.author.is_empty() {
         String::new()
     } else {
-        format!("<author><name>{}</name></author>\n", xml_escape(&row.author))
+        format!(
+            "<author><name>{}</name></author>\n",
+            xml_escape(&row.author)
+        )
     };
     let language = if row.language.is_empty() {
         String::new()
@@ -439,11 +449,7 @@ async fn root_feed(
         crate::rfc3339::now_rfc3339(),
         crate::rfc3339::now_rfc3339(),
     );
-    Ok((
-        [(header::CONTENT_TYPE, NAV_TYPE)],
-        xml,
-    )
-        .into_response())
+    Ok(([(header::CONTENT_TYPE, NAV_TYPE)], xml).into_response())
 }
 
 async fn books_feed(
@@ -469,7 +475,12 @@ async fn works_feed(
 ) -> Result<Response, Response> {
     let user = basic_user(&state, &headers)?;
     let works = query_works(&state, &user.id);
-    let mut xml = feed_open("urn:readest:library:works", "By Work", "/opds/works", NAV_TYPE);
+    let mut xml = feed_open(
+        "urn:readest:library:works",
+        "By Work",
+        "/opds/works",
+        NAV_TYPE,
+    );
     let now = crate::rfc3339::now_rfc3339();
     for (id, title, count) in &works {
         xml.push_str(&format!(
@@ -563,7 +574,10 @@ async fn opensearch() -> Response {
        \x20 <Url type=\"application/atom+xml;profile=opds-catalog;kind=acquisition\" template=\"/opds/search?q={searchTerms}\"/>\n\
        </OpenSearchDescription>\n";
     (
-        [(header::CONTENT_TYPE, "application/opensearchdescription+xml")],
+        [(
+            header::CONTENT_TYPE,
+            "application/opensearchdescription+xml",
+        )],
         xml,
     )
         .into_response()

@@ -76,7 +76,9 @@ impl Config {
         let library_shared = !matches!(get("LIBRARY_SHARED").as_deref(), Some("0" | "false"));
 
         Self {
-            listen_addr: normalize_listen_addr(get("LISTEN_ADDR").unwrap_or_else(|| "0.0.0.0:8080".into())),
+            listen_addr: normalize_listen_addr(
+                get("LISTEN_ADDR").unwrap_or_else(|| "0.0.0.0:8080".into()),
+            ),
             jwt_secret: String::new(),
             data_dir,
             quota_bytes,
@@ -123,10 +125,7 @@ fn resolve_jwt_secret(data_dir: &Path, env_secret: Option<String>) -> anyhow::Re
         if secret.len() >= 16 {
             return Ok(secret);
         }
-        anyhow::bail!(
-            "JWT_SECRET must be >=16 chars (got {})",
-            secret.len()
-        );
+        anyhow::bail!("JWT_SECRET must be >=16 chars (got {})", secret.len());
     }
     let file = data_dir.join(JWT_SECRET_FILE);
     if let Ok(existing) = std::fs::read_to_string(&file) {
@@ -159,7 +158,8 @@ mod tests {
     use super::*;
 
     fn temp_data_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("sync-server-cfg-{}-{}", tag, std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("sync-server-cfg-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -173,17 +173,19 @@ mod tests {
             normalize_listen_addr("127.0.0.1:8080".into()),
             "127.0.0.1:8080"
         );
-        assert_eq!(
-            normalize_listen_addr("[::1]:8080".into()),
-            "[::1]:8080"
-        );
+        assert_eq!(normalize_listen_addr("[::1]:8080".into()), "[::1]:8080");
     }
 
     #[test]
     fn env_secret_wins_over_persisted_file() {
         let dir = temp_data_dir("env-wins");
-        std::fs::write(dir.join(JWT_SECRET_FILE), "0123456789abcdef0123456789abcdef").unwrap();
-        let got = resolve_jwt_secret(&dir, Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0".into())).unwrap();
+        std::fs::write(
+            dir.join(JWT_SECRET_FILE),
+            "0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        let got =
+            resolve_jwt_secret(&dir, Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0".into())).unwrap();
         assert_eq!(got, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -209,7 +211,11 @@ mod tests {
     #[test]
     fn reuses_existing_file_secret() {
         let dir = temp_data_dir("file");
-        std::fs::write(dir.join(JWT_SECRET_FILE), "0123456789abcdef0123456789abcdef\n").unwrap();
+        std::fs::write(
+            dir.join(JWT_SECRET_FILE),
+            "0123456789abcdef0123456789abcdef\n",
+        )
+        .unwrap();
         let got = resolve_jwt_secret(&dir, None).unwrap();
         assert_eq!(got, "0123456789abcdef0123456789abcdef");
         std::fs::remove_dir_all(&dir).ok();

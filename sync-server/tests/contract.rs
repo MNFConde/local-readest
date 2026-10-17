@@ -58,8 +58,7 @@ pub async fn request_with_headers(
     body: Option<Value>,
     extra_headers: &[(&str, &str)],
 ) -> (StatusCode, Value, axum::http::HeaderMap) {
-    let (status, bytes, headers) =
-        request_raw(app, method, uri, token, body, extra_headers).await;
+    let (status, bytes, headers) = request_raw(app, method, uri, token, body, extra_headers).await;
     let json = if bytes.is_empty() {
         Value::Null
     } else {
@@ -307,7 +306,8 @@ async fn passwordless_account_needs_only_email() {
     let state = test_state(test_config("login-empty-pw"));
     {
         let conn = state.db.lock().unwrap();
-        sync_server::users::add_user(&conn, "free@example.com", Some(String::new()), "user").unwrap();
+        sync_server::users::add_user(&conn, "free@example.com", Some(String::new()), "user")
+            .unwrap();
         sync_server::users::ensure_user(&conn, "guard@example.com", "code-guard-123").unwrap();
         // Startup-warning source lists exactly the passwordless accounts.
         assert_eq!(
@@ -347,8 +347,6 @@ async fn passwordless_account_needs_only_email() {
 }
 
 // ── sync (T6) ─────────────────────────────────────────────────────────────
-
-const SECRET: &str = "test-secret-0123456789abcdef";
 
 fn token_for(state: &SharedState, uid: &str) -> String {
     sync_server::jwt::issue(&state.cfg.jwt_secret, uid, Some(uid), "pro", None).unwrap()
@@ -991,7 +989,11 @@ async fn storage_dedup_same_bytes_into_one_blob() {
     .await;
     assert_eq!(s1, StatusCode::OK);
     assert_eq!(s2, StatusCode::OK);
-    assert_eq!(blobs_of(&cfg).len(), 1, "identical bytes must share one blob");
+    assert_eq!(
+        blobs_of(&cfg).len(),
+        1,
+        "identical bytes must share one blob"
+    );
 
     // Both users read their own key back through the hardlink.
     for (tok, key) in [
@@ -1241,8 +1243,7 @@ async fn opds_feed_download_cover_roundtrip() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     // Download round-trip with the exact uploaded bytes.
-    let (status, bytes, headers) =
-        opds_get(app.clone(), "/opds/download/hashFeed", &auth).await;
+    let (status, bytes, headers) = opds_get(app.clone(), "/opds/download/hashFeed", &auth).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(bytes, b"fake epub bytes");
     assert_eq!(
@@ -1266,8 +1267,7 @@ async fn opds_feed_download_cover_roundtrip() {
     )
     .await;
     assert_eq!(s, StatusCode::OK);
-    let (status, bytes, headers) =
-        opds_get(app, "/opds/cover/hashFeed", &auth).await;
+    let (status, bytes, headers) = opds_get(app, "/opds/cover/hashFeed", &auth).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(bytes, b"\x89PNG fake");
     assert_eq!(
@@ -1291,15 +1291,13 @@ async fn opds_shared_visibility_search_and_flag() {
     let app = routes::router(state);
 
     // Shared by default: A sees both books.
-    let (status, xml, _) =
-        opds_get(app.clone(), "/opds/books", &auth_a).await;
+    let (status, xml, _) = opds_get(app.clone(), "/opds/books", &auth_a).await;
     assert_eq!(status, StatusCode::OK);
     let xml = String::from_utf8(xml).unwrap();
     assert!(xml.contains("BookOfA") && xml.contains("BookOfB"));
 
     // Search filters by title.
-    let (status, xml, _) =
-        opds_get(app.clone(), "/opds/search?q=BookOfB", &auth_a).await;
+    let (status, xml, _) = opds_get(app.clone(), "/opds/search?q=BookOfB", &auth_a).await;
     assert_eq!(status, StatusCode::OK);
     let xml = String::from_utf8(xml).unwrap();
     assert!(xml.contains("BookOfB") && !xml.contains("BookOfA"));
@@ -1316,12 +1314,14 @@ async fn opds_shared_visibility_search_and_flag() {
 
     let auth_a2 = basic_header("a2@t.test", "code-a2");
     let app_private = routes::router(state_private);
-    let (status, xml, _) =
-        opds_get(app_private, "/opds/books", &auth_a2).await;
+    let (status, xml, _) = opds_get(app_private, "/opds/books", &auth_a2).await;
     assert_eq!(status, StatusCode::OK);
     let xml = String::from_utf8(xml).unwrap();
     assert!(xml.contains("OnlyMine"));
-    assert!(!xml.contains("NotYours"), "private library hides other users");
+    assert!(
+        !xml.contains("NotYours"),
+        "private library hides other users"
+    );
 }
 
 #[cfg(feature = "library")]
@@ -1375,8 +1375,7 @@ async fn opds_feed_groups_books_by_work() {
 
     // The work feed lists every edition with its acquisition link; the
     // plain books feed exposes the group via rel="collection" links.
-    let (status, xml, _) =
-        opds_get(app.clone(), &format!("/opds/work/{work_id}"), &auth).await;
+    let (status, xml, _) = opds_get(app.clone(), &format!("/opds/work/{work_id}"), &auth).await;
     assert_eq!(status, StatusCode::OK);
     let xml = String::from_utf8(xml).unwrap();
     assert!(xml.contains("Edition One") && xml.contains("Edition Two"));
@@ -1401,8 +1400,13 @@ async fn admin_request(
     body: Option<Value>,
 ) -> (StatusCode, Value, axum::http::HeaderMap) {
     let bearer = admin_token.map(|t| format!("Bearer {t}"));
-    let extra: Vec<(String, String)> = bearer.map(|b| vec![("Authorization".to_string(), b)]).unwrap_or_default();
-    let extra_refs: Vec<(&str, &str)> = extra.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let extra: Vec<(String, String)> = bearer
+        .map(|b| vec![("Authorization".to_string(), b)])
+        .unwrap_or_default();
+    let extra_refs: Vec<(&str, &str)> = extra
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
     request_with_headers(app, method, uri, None, body, &extra_refs).await
 }
 
@@ -1423,8 +1427,14 @@ async fn admin_auth_dual_track_jwt_and_operator_token() {
     let app = routes::router(state.clone());
     let (status, _, _) = admin_request(app.clone(), "GET", "/api/admin/books", None, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    let (status, _, _) =
-        admin_request(app.clone(), "GET", "/api/admin/books", Some("garbage"), None).await;
+    let (status, _, _) = admin_request(
+        app.clone(),
+        "GET",
+        "/api/admin/books",
+        Some("garbage"),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, body, headers) = request_raw(app, "GET", "/admin", None, None, &[]).await;
     assert_eq!(status, StatusCode::OK);
@@ -1444,14 +1454,21 @@ async fn admin_auth_dual_track_jwt_and_operator_token() {
 
     // …admin JWT → 200, plain user JWT → 403.
     let app = routes::router(state.clone());
-    let (status, body, _) =
-        admin_request(app.clone(), "GET", "/api/admin/books", Some(&admin_token), None).await;
+    let (status, body, _) = admin_request(
+        app.clone(),
+        "GET",
+        "/api/admin/books",
+        Some(&admin_token),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["books"], json!([]));
     let (status, body) = login_jwt(&state, "plain@t.test", "plain-pw-123", "dev-plain").await;
     assert_eq!(status, StatusCode::OK);
     let user_token = body["access_token"].as_str().unwrap().to_string();
-    let (status, _, _) = admin_request(app, "GET", "/api/admin/books", Some(&user_token), None).await;
+    let (status, _, _) =
+        admin_request(app, "GET", "/api/admin/books", Some(&user_token), None).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
     // With a token: wrong/missing bearer → 401, right bearer → 200 (ops track).
@@ -1464,8 +1481,14 @@ async fn admin_auth_dual_track_jwt_and_operator_token() {
     let (status, _, _) =
         admin_request(app.clone(), "GET", "/api/admin/books", Some("wrong"), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    let (status, body, _) =
-        admin_request(app, "GET", "/api/admin/books", Some("admin-secret-token"), None).await;
+    let (status, body, _) = admin_request(
+        app,
+        "GET",
+        "/api/admin/books",
+        Some("admin-secret-token"),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["books"], json!([]));
 }
@@ -1581,8 +1604,14 @@ async fn admin_user_crud_password_reset_and_roles() {
     assert_eq!(new_user["role"], "admin");
 
     // Self-guards: an admin cannot delete their own account or change own role.
-    let (status, _, _) =
-        admin_request(app.clone(), "DELETE", "/api/admin/users/boss%40t.test", tok, None).await;
+    let (status, _, _) = admin_request(
+        app.clone(),
+        "DELETE",
+        "/api/admin/users/boss%40t.test",
+        tok,
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let (status, _, _) = admin_request(
         app.clone(),
@@ -1595,8 +1624,14 @@ async fn admin_user_crud_password_reset_and_roles() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     // Delete the created user; login dies with the account.
-    let (status, _, _) =
-        admin_request(app.clone(), "DELETE", "/api/admin/users/new%40t.test", tok, None).await;
+    let (status, _, _) = admin_request(
+        app.clone(),
+        "DELETE",
+        "/api/admin/users/new%40t.test",
+        tok,
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let (status, _) = login_jwt(&state, "new@t.test", "brand-new-pw", "dev-new4").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -1627,12 +1662,18 @@ async fn admin_delete_user_cascades_files_and_catalog() {
     upload_catalog_book(&state, &uid_a, "hashAAA", "Shared Book").await;
     upload_catalog_book(&state, &uid_b, "hashAAA", "Shared Book").await;
     upload_catalog_book(&state, &uid_b, "hashBONLY", "Only B Has It").await;
-    let (status, body, _) = admin_request(app.clone(), "GET", "/api/admin/books", tok, None).await;
+    let (_status, body, _) = admin_request(app.clone(), "GET", "/api/admin/books", tok, None).await;
     assert_eq!(body["books"].as_array().unwrap().len(), 2);
 
     // Deleting A keeps the catalog entry (B still holds a copy).
-    let (status, _, _) =
-        admin_request(app.clone(), "DELETE", "/api/admin/users/a%40t.test", tok, None).await;
+    let (status, _, _) = admin_request(
+        app.clone(),
+        "DELETE",
+        "/api/admin/users/a%40t.test",
+        tok,
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(
         !state.cfg.files_root().join(&uid_a).exists(),
@@ -1642,8 +1683,14 @@ async fn admin_delete_user_cascades_files_and_catalog() {
     assert_eq!(body["books"].as_array().unwrap().len(), 2);
 
     // Deleting B orphans every remaining copy → both catalog rows drop.
-    let (status, _, _) =
-        admin_request(app.clone(), "DELETE", "/api/admin/users/b%40t.test", tok, None).await;
+    let (status, _, _) = admin_request(
+        app.clone(),
+        "DELETE",
+        "/api/admin/users/b%40t.test",
+        tok,
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let (_, body, _) = admin_request(app, "GET", "/api/admin/books", tok, None).await;
     assert_eq!(body["books"].as_array().unwrap().len(), 0, "body: {body}");
@@ -1668,12 +1715,24 @@ async fn admin_delete_book_removes_catalog_files_and_blob() {
     let tok = Some(admin_token.as_str());
 
     // Malformed hash is rejected before any file operation.
-    let (status, _, _) =
-        admin_request(app.clone(), "DELETE", "/api/admin/books/..%2Fetc", tok, None).await;
+    let (status, _, _) = admin_request(
+        app.clone(),
+        "DELETE",
+        "/api/admin/books/..%2Fetc",
+        tok,
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    let (status, _, _) =
-        admin_request(app.clone(), "DELETE", "/api/admin/books/hashDEL1", tok, None).await;
+    let (status, _, _) = admin_request(
+        app.clone(),
+        "DELETE",
+        "/api/admin/books/hashDEL1",
+        tok,
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     // Holder copy and blob are gone; catalog no longer lists the book.
     assert!(!state
@@ -1705,8 +1764,14 @@ async fn admin_book_update_work_grouping_and_source_hash() {
     let tok = Some("admin-secret-token");
 
     // Create a manual work, group both books under it, tag lineage.
-    let (status, body, _) =
-        admin_request(app.clone(), "POST", "/api/admin/works", tok, Some(json!({ "title": "Same Work", "author": "X" }))).await;
+    let (status, body, _) = admin_request(
+        app.clone(),
+        "POST",
+        "/api/admin/works",
+        tok,
+        Some(json!({ "title": "Same Work", "author": "X" })),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let work_id = body["id"].as_str().unwrap().to_string();
 
@@ -1727,7 +1792,7 @@ async fn admin_book_update_work_grouping_and_source_hash() {
     assert_eq!(body["works"][0]["books"], 2, "both books grouped");
 
     // Metadata edit lands.
-    let (status, body, _) = admin_request(
+    let (status, _body, _) = admin_request(
         app.clone(),
         "POST",
         "/api/admin/books/hashE1",
@@ -1765,7 +1830,7 @@ async fn admin_user_state_and_enrich_offline_shape() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["users"].as_array().unwrap().len(), 2);
 
-    let (status, body, _) = admin_request(
+    let (status, _body, _) = admin_request(
         app.clone(),
         "POST",
         "/api/admin/users/u1%40t.test/state",
@@ -1774,14 +1839,20 @@ async fn admin_user_state_and_enrich_offline_shape() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let conn = state.db.lock().unwrap();
-    let disabled: i64 = conn
-        .query_row("SELECT disabled FROM users WHERE email='u1@t.test'", [], |r| r.get(0))
-        .unwrap();
+    // Scoped so the guard drops before the admin enrich call below, which
+    // takes the same lock server-side (clippy: no guard across an await).
+    let disabled: i64 = {
+        let conn = state.db.lock().unwrap();
+        conn.query_row(
+            "SELECT disabled FROM users WHERE email='u1@t.test'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
     assert_eq!(disabled, 1);
 
     // Offline enrich: unreachable network is tolerated and reported per book.
-    drop(conn);
     let (status, body, _) = admin_request(app, "POST", "/api/admin/enrich", tok, None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["enriched"].is_i64());
@@ -1878,16 +1949,26 @@ async fn admin_host_snapshot_store_query_and_auth() {
     let app = routes::router(state);
 
     // Absent by default: the admin page shows "supervisor not connected".
-    let (status, body, _) =
-        admin_request(app.clone(), "GET", "/api/admin/host-snapshot", Some("op-token-123"), None)
-            .await;
+    let (status, body, _) = admin_request(
+        app.clone(),
+        "GET",
+        "/api/admin/host-snapshot",
+        Some("op-token-123"),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["available"], json!(false));
 
     // No credential → 401 on both verbs; a non-object body → 400.
-    let (status, _, _) =
-        admin_request(app.clone(), "POST", "/api/admin/host-snapshot", None, Some(json!({"schema": 1})))
-            .await;
+    let (status, _, _) = admin_request(
+        app.clone(),
+        "POST",
+        "/api/admin/host-snapshot",
+        None,
+        Some(json!({"schema": 1})),
+    )
+    .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, _, _) = admin_request(
         app.clone(),
@@ -1918,8 +1999,14 @@ async fn admin_host_snapshot_store_query_and_auth() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    let (status, body, _) =
-        admin_request(app, "GET", "/api/admin/host-snapshot", Some("op-token-123"), None).await;
+    let (status, body, _) = admin_request(
+        app,
+        "GET",
+        "/api/admin/host-snapshot",
+        Some("op-token-123"),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["available"], json!(true));
     assert_eq!(body["snapshot"], snapshot);

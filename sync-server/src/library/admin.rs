@@ -36,7 +36,10 @@ pub fn router(state: SharedState) -> Router<SharedState> {
         .route("/users/{email}/state", post(set_user_state))
         // Supervisor metrics feed (ROADMAP 待办⑦): the process manager POSTs
         // a snapshot every few seconds; the admin page reads the newest one.
-        .route("/host-snapshot", get(get_host_snapshot).post(post_host_snapshot))
+        .route(
+            "/host-snapshot",
+            get(get_host_snapshot).post(post_host_snapshot),
+        )
         .with_state(state)
 }
 
@@ -44,11 +47,7 @@ pub fn router(state: SharedState) -> Router<SharedState> {
 /// localStorage, everything else is fetch + render.
 pub async fn admin_page() -> Response {
     let html = include_str!("admin.html");
-    (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        html,
-    )
-        .into_response()
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
 // ── auth ────────────────────────────────────────────────────────────────────
@@ -104,13 +103,16 @@ async fn list_books(
     headers: HeaderMap,
 ) -> Result<Response, Response> {
     require_admin(&state, &headers).await?;
-    let conn = state.db.lock().map_err(|_| super::admin_error("db lock poisoned"))?;
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| super::admin_error("db lock poisoned"))?;
     let mut stmt = conn
         .prepare(
             "SELECT hash, title, author, language, work_id, source_hash, added_at, added_by
              FROM catalog_books ORDER BY added_at DESC",
         )
-        .map_err(|e| super::admin_error(e))?;
+        .map_err(super::admin_error)?;
     let rows = stmt
         .query_map([], |r| {
             Ok(json!({
@@ -124,7 +126,7 @@ async fn list_books(
                 "addedBy": r.get::<_, String>(7)?,
             }))
         })
-        .map_err(|e| super::admin_error(e))?
+        .map_err(super::admin_error)?
         .flatten()
         .collect::<Vec<_>>();
     Ok(Json(json!({ "books": rows })).into_response())
@@ -171,20 +173,27 @@ async fn update_book(
     }
     args.push(hash.clone());
 
-    let conn = state.db.lock().map_err(|_| super::admin_error("db lock poisoned"))?;
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| super::admin_error("db lock poisoned"))?;
     if setting_work {
         conn.execute(
             "INSERT OR IGNORE INTO works (id, title, author) VALUES (?1, '', '')",
             params![work_id],
         )
-        .map_err(|e| super::admin_error(e))?;
+        .map_err(super::admin_error)?;
     }
     let n = conn
         .execute(
-            &format!("UPDATE catalog_books SET {} WHERE hash = ?{}", sets.join(", "), args.len()),
+            &format!(
+                "UPDATE catalog_books SET {} WHERE hash = ?{}",
+                sets.join(", "),
+                args.len()
+            ),
             rusqlite::params_from_iter(args.iter()),
         )
-        .map_err(|e| super::admin_error(e))?;
+        .map_err(super::admin_error)?;
     Ok(Json(json!({ "updated": n })).into_response())
 }
 
@@ -193,14 +202,17 @@ async fn list_works(
     headers: HeaderMap,
 ) -> Result<Response, Response> {
     require_admin(&state, &headers).await?;
-    let conn = state.db.lock().map_err(|_| super::admin_error("db lock poisoned"))?;
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| super::admin_error("db lock poisoned"))?;
     let mut stmt = conn
         .prepare(
             "SELECT w.id, w.title, w.author, COUNT(b.hash)
              FROM works w LEFT JOIN catalog_books b ON b.work_id = w.id
              GROUP BY w.id ORDER BY w.id",
         )
-        .map_err(|e| super::admin_error(e))?;
+        .map_err(super::admin_error)?;
     let rows = stmt
         .query_map([], |r| {
             Ok(json!({
@@ -210,7 +222,7 @@ async fn list_works(
                 "books": r.get::<_, i64>(3)?,
             }))
         })
-        .map_err(|e| super::admin_error(e))?
+        .map_err(super::admin_error)?
         .flatten()
         .collect::<Vec<_>>();
     Ok(Json(json!({ "works": rows })).into_response())
@@ -228,12 +240,15 @@ async fn create_work(
     let author = payload.get("author").and_then(Value::as_str).unwrap_or("");
     use rand::Rng;
     let id = format!("manual-{}", hex::encode(rand::rng().random::<[u8; 4]>()));
-    let conn = state.db.lock().map_err(|_| super::admin_error("db lock poisoned"))?;
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| super::admin_error("db lock poisoned"))?;
     conn.execute(
         "INSERT INTO works (id, title, author) VALUES (?1, ?2, ?3)",
         params![id, title, author],
     )
-    .map_err(|e| super::admin_error(e))?;
+    .map_err(super::admin_error)?;
     Ok(Json(json!({ "id": id })).into_response())
 }
 
@@ -245,18 +260,25 @@ async fn enrich(
 ) -> Result<Response, Response> {
     require_admin(&state, &headers).await?;
     let titles: Vec<(String, String, String)> = {
-        let conn = state.db.lock().map_err(|_| super::admin_error("db lock poisoned"))?;
+        let conn = state
+            .db
+            .lock()
+            .map_err(|_| super::admin_error("db lock poisoned"))?;
         let mut stmt = conn
             .prepare(
                 "SELECT hash, title, author FROM catalog_books
                  WHERE work_id IS NULL AND title != ''",
             )
-            .map_err(|e| super::admin_error(e))?;
+            .map_err(super::admin_error)?;
         let rows = stmt
             .query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
             })
-            .map_err(|e| super::admin_error(e))?
+            .map_err(super::admin_error)?
             .flatten();
         rows.collect()
     };
@@ -266,19 +288,22 @@ async fn enrich(
     for (hash, title, author) in &titles {
         match super::ol::lookup_work(&client, title, author).await {
             Ok(Some(hit)) => {
-                let conn = state.db.lock().map_err(|_| super::admin_error("db lock poisoned"))?;
+                let conn = state
+                    .db
+                    .lock()
+                    .map_err(|_| super::admin_error("db lock poisoned"))?;
                 conn.execute(
                     "INSERT OR IGNORE INTO works (id, title, author) VALUES (?1, '', '')",
                     params![hit.work_id],
                 )
-                .map_err(|e| super::admin_error(e))?;
+                .map_err(super::admin_error)?;
                 conn.execute(
                     "UPDATE catalog_books SET work_id = ?2,
                      language = CASE WHEN language = '' THEN ?3 ELSE language END
                      WHERE hash = ?1",
                     params![hash, hit.work_id, hit.language],
                 )
-                .map_err(|e| super::admin_error(e))?;
+                .map_err(super::admin_error)?;
                 enriched += 1;
             }
             Ok(None) => failed.push(json!({ "hash": hash, "error": "no OL match" })),
@@ -288,10 +313,7 @@ async fn enrich(
     Ok(Json(json!({ "enriched": enriched, "failed": failed })).into_response())
 }
 
-async fn gc(
-    State(state): State<SharedState>,
-    headers: HeaderMap,
-) -> Result<Response, Response> {
+async fn gc(State(state): State<SharedState>, headers: HeaderMap) -> Result<Response, Response> {
     require_admin(&state, &headers).await?;
     let removed = crate::storage::gc_blobs(&state.cfg);
     Ok(Json(json!({ "removed": removed })).into_response())
@@ -302,8 +324,11 @@ async fn list_users(
     headers: HeaderMap,
 ) -> Result<Response, Response> {
     require_admin(&state, &headers).await?;
-    let conn = state.db.lock().map_err(|_| super::admin_error("db lock poisoned"))?;
-    let rows = crate::users::list_users(&conn).map_err(|e| super::admin_error(e))?;
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| super::admin_error("db lock poisoned"))?;
+    let rows = crate::users::list_users(&conn).map_err(super::admin_error)?;
     let users: Vec<Value> = rows
         .iter()
         .map(|(email, id, disabled, created, role)| {
@@ -352,7 +377,10 @@ async fn create_user(
         Some(_) => return Err(StatusCode::BAD_REQUEST.into_response()),
     };
 
-    let conn = state.db.lock().map_err(|_| super::admin_error("db lock poisoned"))?;
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| super::admin_error("db lock poisoned"))?;
     let exists: Option<i64> = conn
         .query_row(
             "SELECT 1 FROM users WHERE email = ?1",
@@ -367,8 +395,8 @@ async fn create_user(
         )
             .into_response());
     }
-    let created = crate::users::add_user(&conn, &email, password, &role)
-        .map_err(|e| super::admin_error(e))?;
+    let created =
+        crate::users::add_user(&conn, &email, password, &role).map_err(super::admin_error)?;
     Ok(Json(json!({
         "email": created.email,
         // Returned exactly once; the UI must show it before it can't be recovered.
@@ -395,7 +423,10 @@ async fn delete_user(
         )
             .into_response());
     }
-    let conn = state.db.lock().map_err(|_| super::admin_error("db lock poisoned"))?;
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| super::admin_error("db lock poisoned"))?;
     let uid: Option<String> = conn
         .query_row(
             "SELECT id FROM users WHERE email = ?1",
@@ -423,10 +454,10 @@ async fn delete_user(
             &format!("DELETE FROM {table} WHERE user_id = ?1"),
             params![uid],
         )
-        .map_err(|e| super::admin_error(e))?;
+        .map_err(super::admin_error)?;
     }
     conn.execute("DELETE FROM users WHERE email = ?1", params![email])
-        .map_err(|e| super::admin_error(e))?;
+        .map_err(super::admin_error)?;
     drop(conn);
 
     // Their uploaded copies are gone with the account; the files/ tree entry
@@ -461,7 +492,10 @@ async fn reset_password(
         }
     };
     let had_explicit_password = matches!(explicit, Some(Some(_)));
-    let conn = state.db.lock().map_err(|_| super::admin_error("db lock poisoned"))?;
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| super::admin_error("db lock poisoned"))?;
     match crate::users::reset_code(&conn, &email, explicit.flatten()) {
         Ok(Some(code)) => {
             if had_explicit_password {
@@ -503,7 +537,10 @@ async fn set_user_role(
         )
             .into_response());
     }
-    let conn = state.db.lock().map_err(|_| super::admin_error("db lock poisoned"))?;
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| super::admin_error("db lock poisoned"))?;
     match crate::users::set_role(&conn, &email, role) {
         Ok(true) => Ok(Json(json!({ "updated": 1, "role": role })).into_response()),
         Ok(false) => Err((
@@ -593,13 +630,13 @@ async fn delete_book(
     if !is_safe_hash(&hash) {
         return Err(StatusCode::BAD_REQUEST.into_response());
     }
-    let conn = state.db.lock().map_err(|_| super::admin_error("db lock poisoned"))?;
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| super::admin_error("db lock poisoned"))?;
     let n = conn
-        .execute(
-            "DELETE FROM catalog_books WHERE hash = ?1",
-            params![hash],
-        )
-        .map_err(|e| super::admin_error(e))?;
+        .execute("DELETE FROM catalog_books WHERE hash = ?1", params![hash])
+        .map_err(super::admin_error)?;
     drop(conn);
     if n == 0 {
         return Err((
@@ -634,9 +671,15 @@ async fn set_user_state(
     require_admin(&state, &headers).await?;
     let payload: Value =
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
-    let disabled = payload.get("disabled").and_then(Value::as_bool).unwrap_or(false);
-    let conn = state.db.lock().map_err(|_| super::admin_error("db lock poisoned"))?;
-    let n = crate::users::set_disabled(&conn, &email, disabled).map_err(|e| super::admin_error(e))?;
+    let disabled = payload
+        .get("disabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| super::admin_error("db lock poisoned"))?;
+    let n = crate::users::set_disabled(&conn, &email, disabled).map_err(super::admin_error)?;
     Ok(Json(json!({ "updated": n })).into_response())
 }
 

@@ -115,15 +115,7 @@ pub fn verify_login(conn: &Connection, code: &str) -> anyhow::Result<Option<User
             "SELECT id, email, code_argon2, plan, role FROM users
              WHERE code_sha256 = ?1 AND disabled = 0",
             params![code_sha256(code)],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                ))
-            },
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()?;
     Ok(row.and_then(|(id, email, argon, plan, role)| {
@@ -149,15 +141,7 @@ pub fn verify_login_email(
             "SELECT id, email, code_argon2, plan, role FROM users
              WHERE email = ?1 AND code_sha256 = ?2 AND disabled = 0",
             params![email, code_sha256(code)],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                ))
-            },
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()?;
     Ok(row.and_then(|(id, email, argon, plan, role)| {
@@ -183,12 +167,11 @@ pub fn empty_password_emails(conn: &Connection) -> anyhow::Result<Vec<String>> {
 }
 
 /// (email, id, disabled, created_at, role)
-pub fn list_users(
-    conn: &Connection,
-) -> anyhow::Result<Vec<(String, String, bool, String, String)>> {
-    let mut stmt = conn.prepare(
-        "SELECT email, id, disabled, created_at, role FROM users ORDER BY created_at",
-    )?;
+pub type UserRow = (String, String, bool, String, String);
+
+pub fn list_users(conn: &Connection) -> anyhow::Result<Vec<UserRow>> {
+    let mut stmt = conn
+        .prepare("SELECT email, id, disabled, created_at, role FROM users ORDER BY created_at")?;
     let rows = stmt
         .query_map([], |r| {
             Ok((
@@ -245,9 +228,7 @@ fn iso_now() -> String {
 }
 
 /// Pretty-print a user list row for the CLI.
-pub fn format_user_row(
-    row: &(String, String, bool, String, String),
-) -> impl fmt::Display {
+pub fn format_user_row(row: &(String, String, bool, String, String)) -> impl fmt::Display {
     let (email, id, disabled, created, role) = row;
     format!(
         "{email:<32} {id}  {}  role={role}  created_unix={created}",

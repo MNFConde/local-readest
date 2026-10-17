@@ -77,9 +77,9 @@ fn main() -> anyhow::Result<()> {
             })
         }
         Some("passwd") => {
-            let email = args
-                .get(1)
-                .ok_or_else(|| anyhow::anyhow!("usage: passwd <email> [--password <new-password>]"))?;
+            let email = args.get(1).ok_or_else(|| {
+                anyhow::anyhow!("usage: passwd <email> [--password <new-password>]")
+            })?;
             let secret = secret_flag(&args);
             account_op(|conn| match users::reset_code(conn, email, secret)? {
                 Some(code) if code.is_empty() => {
@@ -150,7 +150,9 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
     }
     let conn = db::open_db(&cfg)?;
     for email in users::empty_password_emails(&conn)? {
-        tracing::warn!("account {email} has an EMPTY password — anyone knowing the email can log in");
+        tracing::warn!(
+            "account {email} has an EMPTY password — anyone knowing the email can log in"
+        );
     }
     let state: db::SharedState = Arc::new(db::AppState {
         db: conn.into(),
@@ -188,13 +190,28 @@ mod tests {
 
     #[test]
     fn secret_flag_parses_password_and_legacy_code() {
-        assert_eq!(secret_flag(&args(&["add-user", "a@b", "--password", "pw"])), Some("pw".into()));
-        assert_eq!(secret_flag(&args(&["add-user", "a@b", "--code", "legacy"])), Some("legacy".into()));
+        assert_eq!(
+            secret_flag(&args(&["add-user", "a@b", "--password", "pw"])),
+            Some("pw".into())
+        );
+        assert_eq!(
+            secret_flag(&args(&["add-user", "a@b", "--code", "legacy"])),
+            Some("legacy".into())
+        );
         // `--password ""` is an explicit passwordless account, not "absent".
-        assert_eq!(secret_flag(&args(&["add-user", "a@b", "--password", ""])), Some("".into()));
+        assert_eq!(
+            secret_flag(&args(&["add-user", "a@b", "--password", ""])),
+            Some("".into())
+        );
         // Flag at the end of the line: explicit empty, not random.
-        assert_eq!(secret_flag(&args(&["passwd", "a@b", "--password"])), Some("".into()));
-        assert_eq!(secret_flag(&args(&["passwd", "a@b", "--password", "--json"])), Some("".into()));
+        assert_eq!(
+            secret_flag(&args(&["passwd", "a@b", "--password"])),
+            Some("".into())
+        );
+        assert_eq!(
+            secret_flag(&args(&["passwd", "a@b", "--password", "--json"])),
+            Some("".into())
+        );
         // No flag at all: caller generates a random secret.
         assert_eq!(secret_flag(&args(&["add-user", "a@b"])), None);
     }

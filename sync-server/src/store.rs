@@ -94,7 +94,7 @@ fn merge_book_fields_client_wins(client: &mut Map<String, Value>, server: &Map<S
 
 fn ms_newer(client: Option<i64>, old: Option<i64>) -> bool {
     match (client, old) {
-        (Some(c), None) => true,
+        (Some(_c), None) => true,
         (Some(c), Some(o)) => c > o,
         _ => false,
     }

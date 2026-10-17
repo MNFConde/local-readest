@@ -23,11 +23,8 @@ pub fn register_upload(conn: &mut Connection, uid: &str, key: &str) -> anyhow::R
     let file_name = key.rsplit('/').next().unwrap_or("");
     let fallback_title = file_name.rsplit_once('.').map_or(file_name, |(t, _)| t);
 
-    let (mut title, mut author, mut language) = (
-        fallback_title.to_string(),
-        String::new(),
-        String::new(),
-    );
+    let (mut title, mut author, mut language) =
+        (fallback_title.to_string(), String::new(), String::new());
     if let Ok(Some(row)) = crate::store::get_book(&tx, uid, &hash) {
         if let Some(obj) = row.data.as_object() {
             let pick = |field: &str| -> Option<String> {

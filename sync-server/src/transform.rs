@@ -127,7 +127,6 @@ fn omit_str(s: &str) -> bool {
     s.is_empty()
 }
 
-
 #[derive(Debug, Serialize)]
 pub struct DbBook {
     pub user_id: String,

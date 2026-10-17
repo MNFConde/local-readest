@@ -53,7 +53,11 @@ pub async fn lookup_work(
         crate::proxy::urlencoded(&q)
     );
     let body: Value = client.get(&url).send().await?.json().await?;
-    let docs = body.get("docs").and_then(Value::as_array).cloned().unwrap_or_default();
+    let docs = body
+        .get("docs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     Ok(pick_work(&docs))
 }
 

@@ -145,15 +145,8 @@ pub async fn upload(
     Ok(Json(json!({ "uploadUrl": blob_url, "downloadUrl": blob_url })).into_response())
 }
 
-fn blob_path(state: &SharedState, key: &str) -> Result<PathBuf, Response> {
-    let Some(path) = key_to_path(&state.cfg.files_root(), key) else {
-        return Err(storage_error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid key",
-            "VALIDATION",
-        ));
-    };
-    Ok(path)
+fn blob_path(state: &SharedState, key: &str) -> Option<PathBuf> {
+    key_to_path(&state.cfg.files_root(), key)
 }
 
 /// Store `body` content-addressed under `blobs/<sha256>` and hard-link the
@@ -243,9 +236,7 @@ fn link_count(path: &Path) -> u64 {
             index_high: 0,
             index_low: 0,
         };
-        let ok = unsafe {
-            GetFileInformationByHandle(file.as_raw_handle(), &mut info)
-        };
+        let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
         if ok == 0 {
             2
         } else {
@@ -271,10 +262,8 @@ pub fn gc_blobs(cfg: &crate::config::Config) -> usize {
         if entry.file_type().map(|t| t.is_dir()).unwrap_or(true) {
             continue;
         }
-        if link_count(&entry.path()) <= 1 {
-            if std::fs::remove_file(entry.path()).is_ok() {
-                removed += 1;
-            }
+        if link_count(&entry.path()) <= 1 && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
         }
     }
     removed
@@ -313,7 +302,7 @@ pub async fn blob_put(
         }
     }
     let path =
-        blob_path(&state, &key).map_err(|_r| ApiError::server(anyhow::anyhow!("rejected key")))?;
+        blob_path(&state, &key).ok_or_else(|| ApiError::server(anyhow::anyhow!("rejected key")))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| ApiError::server(anyhow::anyhow!(e)))?;
     }
@@ -523,7 +512,6 @@ pub async fn list(
         files.retain(|f| f.key.contains(&search));
     }
     files.sort_by(|a, b| {
-        use std::cmp::Ordering;
         let ord = match sort_by {
             "size" => b
                 .size
