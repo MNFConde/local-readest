@@ -38,6 +38,7 @@
 ## 测试注意
 
 - mock `@/utils/supabase` 时必须继续导出 `SELFHOSTED`(真实值为构建期常量,测试里通常 mock 为 `false`)。
+- 抽取新模块时,检查新模块**整条 import 链在模块求值期**调用的导出(例:`libraryStore` 顶层调 `isTauriAppPlatform()`):既有测试的 `vi.mock` 工厂须同步补齐这些导出,否则测试文件在收集期即炸(报错形如 `No "X" export is defined on the "..." mock`)。
 - 共享组件的既有测试都按 `SELFHOSTED=false` 跑,重构必须保持非 selfhost 路径是上游行为。
 
 ## 依赖
