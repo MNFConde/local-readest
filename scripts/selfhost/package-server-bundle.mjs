@@ -107,24 +107,30 @@ step('clear previous output', () => {
 //
 // The standalone tree is full of pnpm symlinks/junctions into the build
 // machine's store, and the copy must materialize them as real files (the
-// release zip cannot carry links). Node's cpSync(dereference) crashed the
-// process natively on the CI runner (silent exit 127 two seconds in, twice,
-// while the identical script passed locally) — robocopy does the same job
-// with native iterative traversal and follows links by default. Exit codes
-// 0-7 are success (bitmask: 1 copied, 2 extras, 4 mismatches); >=8 is real.
-step('copy standalone web tree (robocopy follows pnpm links)', () => {
-  const robocopy = path.join(process.env.WINDIR ?? 'C:\\Windows', 'System32', 'Robocopy.exe');
-  const result = spawnSync(
-    existsSync(robocopy) ? robocopy : 'robocopy',
-    [inputs.standalone, path.join(outDir, 'web'), '/E', '/MT:16', '/R:2', '/W:2',
-      '/NFL', '/NDL', '/NJH', '/NJS', '/NP'],
-    { encoding: 'utf8' },
-  );
-  if (result.error) die(`robocopy failed to start: ${result.error.stack}`);
-  if ((result.status ?? 8) >= 8) {
-    die(`robocopy exited ${result.status}:\n${(result.stdout ?? '').split('\n').slice(-30).join('\n')}`);
+// release zip cannot carry links). Two native tools already failed on the
+// CI runner: node cpSync(dereference) crashed the process (silent exit 127,
+// twice), and robocopy /MT failed with exit 9 while losing its own error
+// output. bsdtar with -h (follow links) through a temp archive is the third
+// option: iterative traversal, no console-handle quirks, full stderr.
+const runOrDie = (name, exe, args) => {
+  const result = spawnSync(exe, args, { encoding: 'utf8' });
+  if (result.error) die(`${name} failed to start: ${result.error.stack}`);
+  if (result.status !== 0) {
+    die(`${name} exited ${result.status}\n--- stdout tail ---\n` +
+      (result.stdout ?? '').split('\n').slice(-20).join('\n') +
+      '\n--- stderr tail ---\n' +
+      (result.stderr ?? '').split('\n').slice(-20).join('\n'));
   }
-  console.log(`[bundle] robocopy exited ${result.status} (0-7 is success)`);
+};
+step('copy standalone web tree (bsdtar -h materializes pnpm links)', () => {
+  const bsdtar = path.join(process.env.WINDIR ?? 'C:\\Windows', 'System32', 'tar.exe');
+  const webDir = path.join(outDir, 'web');
+  const tmpTar = path.join(root, 'build', 'web-tree.tar');
+  rmSync(tmpTar, { force: true });
+  runOrDie('bsdtar create', bsdtar, ['-h', '-cf', tmpTar, '-C', inputs.standalone, '.']);
+  mkdirSync(webDir, { recursive: true });
+  runOrDie('bsdtar extract', bsdtar, ['-xf', tmpTar, '-C', webDir]);
+  rmSync(tmpTar, { force: true });
 });
 step('copy static assets', () =>
   cpSync(inputs.staticDir, path.join(outDir, 'web', 'apps', 'readest-app', '.next', 'static'), {
