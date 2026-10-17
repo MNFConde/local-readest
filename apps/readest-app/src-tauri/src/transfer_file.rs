@@ -327,7 +327,9 @@ pub async fn download_file<R: tauri::Runtime>(
         start: u64,
         end: u64,
     ) -> Result<bytes::Bytes> {
-        let mut req = client.get(url).header("Range", format!("bytes={start}-{end}"));
+        let mut req = client
+            .get(url)
+            .header("Range", format!("bytes={start}-{end}"));
         for (key, value) in headers {
             req = req.header(key, value);
         }
