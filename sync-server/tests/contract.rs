@@ -38,6 +38,7 @@ pub fn test_state(cfg: Config) -> SharedState {
         login_limiter: Mutex::new(sync_server::ratelimit::LoginLimiter::new()),
         host_snapshot: Mutex::new(None),
         started_at: std::time::Instant::now(),
+        backup_busy: std::sync::atomic::AtomicBool::new(false),
     })
 }
 
@@ -2207,4 +2208,112 @@ async fn admin_stats_counts_sizes_and_auth() {
     );
     assert_eq!(body["server"]["version"], env!("CARGO_PKG_VERSION"));
     assert!(body["server"]["uptime_secs"].as_u64().unwrap() < 60);
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn admin_backup_tar_carries_rebuild_triple_and_auth() {
+    use std::io::{Cursor, Read};
+
+    let mut cfg = test_config("admin-backup");
+    cfg.admin_token = Some("op-token-789".into());
+    let data_dir = cfg.data_dir.clone();
+    let state = test_state(cfg);
+    let uid_a = seed_user(&state, "backup-a@x.com", "code-backup-a1");
+
+    // One uploaded book so the tar must carry its blob — and NOT the files/
+    // hard-link copy (a restore re-materializes copies from the blob store).
+    upload_catalog_book(&state, &uid_a, "hashBK1", "Backed Up").await;
+
+    let app = routes::router(state.clone());
+
+    // No credential → 401.
+    let (status, _, _) = admin_request(app.clone(), "GET", "/api/admin/backup", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, bytes, headers) = request_raw(
+        app.clone(),
+        "GET",
+        "/api/admin/backup",
+        None,
+        None,
+        &[("Authorization", "Bearer op-token-789")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers.get("content-type").and_then(|v| v.to_str().ok()),
+        Some("application/x-tar")
+    );
+    assert!(
+        headers
+            .get("content-disposition")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("attachment; filename=\"readest-backup-")),
+        "unexpected content-disposition: {headers:?}"
+    );
+
+    // A sequential second backup must succeed too: the busy guard resets and
+    // the tmp snapshot is cleaned between runs.
+    let (status2, _, _) = request_raw(
+        app,
+        "GET",
+        "/api/admin/backup",
+        None,
+        None,
+        &[("Authorization", "Bearer op-token-789")],
+    )
+    .await;
+    assert_eq!(status2, StatusCode::OK);
+    assert!(!state.backup_busy.load(std::sync::atomic::Ordering::Relaxed));
+
+    // Walk the archive: exactly the rebuild triple, no files/ entries. The
+    // blob entry name is the content hash (same as production book hashes).
+    use sha2::{Digest, Sha256};
+    let blob_name = format!("blobs/{}", hex::encode(Sha256::digest(b"fake epub bytes")));
+    let (mut db_bytes, mut blob_bytes, mut secret_bytes, mut files_entries) =
+        (None, None, None, 0usize);
+    for entry in tar::Archive::new(Cursor::new(&bytes)).entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let name = entry.path().unwrap().to_string_lossy().into_owned();
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).unwrap();
+        if name == "readest.db" {
+            db_bytes = Some(data);
+        } else if name == blob_name {
+            blob_bytes = Some(data);
+        } else if name == "jwt_secret.key" {
+            secret_bytes = Some(data);
+        }
+        if name.starts_with("files/") {
+            files_entries += 1;
+        }
+    }
+    assert!(
+        db_bytes.as_ref().is_some_and(|d| !d.is_empty()),
+        "archive must carry a non-empty db snapshot"
+    );
+    assert_eq!(
+        blob_bytes.as_deref(),
+        Some(b"fake epub bytes".as_slice()),
+        "the book's blob must travel verbatim"
+    );
+    // test_config keeps the secret config-only (no key file on disk) — the
+    // in-memory fallback must land in the archive.
+    assert_eq!(
+        secret_bytes.as_deref(),
+        Some("test-secret-0123456789abcdef".as_bytes())
+    );
+    assert_eq!(files_entries, 0, "files/ hard-link copies stay out");
+
+    // The snapshot is a bootable db: the seeded account must be in it.
+    let restored = data_dir.join("restore-check.db");
+    std::fs::write(&restored, db_bytes.unwrap()).unwrap();
+    let conn = rusqlite::Connection::open(&restored).unwrap();
+    let users: i64 = conn
+        .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(users, 1, "restored db must contain the seeded account");
+    drop(conn);
+    let _ = std::fs::remove_file(&restored);
 }

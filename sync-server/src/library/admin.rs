@@ -10,8 +10,10 @@
 //! CLI-only; it is available both places now.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::path::{Path as FsPath, PathBuf};
 
+use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -44,6 +46,8 @@ pub fn router(state: SharedState) -> Router<SharedState> {
         )
         // Aggregate overview numbers for the admin console's Overview tab.
         .route("/stats", get(get_stats))
+        // Full-server rebuild archive for the Maintenance tab.
+        .route("/backup", get(backup))
         .with_state(state)
 }
 
@@ -912,4 +916,172 @@ async fn get_stats(
         },
     }))
     .into_response())
+}
+
+// ── full-server backup (admin console Maintenance tab) ─────────────────────
+// GET /api/admin/backup streams one tar with everything a fresh data_dir
+// needs to boot: `readest.db` (a VACUUM INTO snapshot, taken under the db
+// lock so the copy is transactional), the whole `blobs/` content store, and
+// `jwt_secret.key` (so every issued client token survives a restore).
+// `files/` is left out on purpose: its per-uid copies are hard links into
+// blobs/ and would re-inflate every deduped byte — a restore re-materializes
+// copies from the blob store instead. Contract: sync-protocol.md §6.4.
+
+/// Bridges the synchronous tar builder into the response body: chunks go
+/// through an mpsc channel so the archive never sits in memory whole.
+struct ChannelWriter {
+    tx: tokio::sync::mpsc::Sender<Result<Vec<u8>, std::io::Error>>,
+    buf: Vec<u8>,
+}
+
+const BACKUP_CHUNK_BYTES: usize = 64 * 1024;
+
+impl Write for ChannelWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(data);
+        if self.buf.len() >= BACKUP_CHUNK_BYTES {
+            self.flush_buf()?;
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.flush_buf()
+    }
+}
+
+impl ChannelWriter {
+    fn flush_buf(&mut self) -> std::io::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        let chunk = std::mem::take(&mut self.buf);
+        // Receiver gone = client disconnected: tear the archive down.
+        self.tx
+            .blocking_send(Ok(chunk))
+            .map_err(|_| std::io::Error::other("backup stream closed"))
+    }
+}
+
+/// Resets `AppState::backup_busy` when the streaming task ends — success,
+/// build error, or client disconnect alike.
+struct ResetBackupBusy(SharedState);
+
+impl Drop for ResetBackupBusy {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.0.backup_busy.store(false, Ordering::Release);
+    }
+}
+
+fn write_backup_tar(
+    snapshot: &FsPath,
+    blobs_root: &FsPath,
+    jwt_secret: &str,
+    tx: tokio::sync::mpsc::Sender<Result<Vec<u8>, std::io::Error>>,
+) -> std::io::Result<()> {
+    let mut writer = ChannelWriter {
+        tx,
+        buf: Vec::new(),
+    };
+    // Inner scope: tar::Builder holds `writer` until its Drop runs.
+    {
+        let mut builder = tar::Builder::new(&mut writer);
+        builder.append_path_with_name(snapshot, "readest.db")?;
+        // Blobs are the authoritative bytes; per-uid files/ copies are rebuilt
+        // from them on restore (the blob file name is the content hash).
+        let mut blobs = Vec::new();
+        collect_files(blobs_root, &mut String::new(), &mut blobs);
+        blobs.sort();
+        for (key, path) in &blobs {
+            builder.append_path_with_name(path, format!("blobs/{key}"))?;
+        }
+        let mut header = tar::Header::new_gnu();
+        header.set_size(jwt_secret.len() as u64);
+        header.set_mode(0o600);
+        header.set_cksum();
+        builder.append_data(&mut header, "jwt_secret.key", jwt_secret.as_bytes())?;
+        builder.finish()?;
+    }
+    writer.flush()
+}
+
+/// GET /api/admin/backup — one tar, streamed. Two concurrent backups are
+/// refused with 409: they would race on the tmp snapshot path and stall each
+/// other's VACUUM.
+async fn backup(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    use std::sync::atomic::Ordering;
+    require_admin(&state, &headers).await?;
+    if state
+        .backup_busy
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "backup already in progress" })),
+        )
+            .into_response());
+    }
+
+    // Clear any snapshot left by a crashed earlier run, then copy the db
+    // under the lock — a transactional, WAL-free file; brief write stall.
+    let tmp = state.cfg.data_dir.join("readest.db.backup-tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let _ = std::fs::create_dir_all(&state.cfg.data_dir);
+    {
+        let conn = state
+            .db
+            .lock()
+            .map_err(|_| super::admin_error("db lock poisoned"))?;
+        let tmp_sql = tmp.to_string_lossy().into_owned();
+        conn.execute("VACUUM INTO ?1", params![tmp_sql])
+            .map_err(super::admin_error)?;
+    }
+
+    // The signing key travels in the archive so a restored server keeps every
+    // issued client token valid. An env-provided secret has no file on disk —
+    // fall back to the in-memory value.
+    let jwt_secret = std::fs::read_to_string(state.cfg.data_dir.join("jwt_secret.key"))
+        .unwrap_or_else(|_| state.cfg.jwt_secret.clone());
+    let jwt_secret = jwt_secret.trim().to_string();
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(8);
+    let err_tx = tx.clone();
+    let blobs_root = state.cfg.blobs_root();
+    let task_state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let _reset = ResetBackupBusy(task_state);
+        let outcome = write_backup_tar(&tmp, &blobs_root, &jwt_secret, tx);
+        let _ = std::fs::remove_file(&tmp);
+        // Surface a mid-stream failure in-band so the client's tar read
+        // errors out instead of silently accepting a truncated archive.
+        if let Err(e) = outcome {
+            let _ = err_tx.blocking_send(Err(e));
+        }
+    });
+
+    let now = time::OffsetDateTime::now_utc();
+    let stamp = format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}",
+        now.year(),
+        u8::from(now.month()),
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second()
+    );
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/x-tar")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"readest-backup-{stamp}.tar\""),
+        )
+        .body(Body::from_stream(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        ))
+        .map_err(super::admin_error)
 }

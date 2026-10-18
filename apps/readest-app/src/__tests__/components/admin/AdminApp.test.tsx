@@ -8,13 +8,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
 
-const { listUsers, listBooks, getBookHolders, deleteBook, getStats } = vi.hoisted(() => ({
-  listUsers: vi.fn(),
-  listBooks: vi.fn(),
-  getBookHolders: vi.fn(),
-  deleteBook: vi.fn(),
-  getStats: vi.fn(),
-}));
+const { listUsers, listBooks, getBookHolders, deleteBook, getStats, downloadBackup } = vi.hoisted(
+  () => ({
+    listUsers: vi.fn(),
+    listBooks: vi.fn(),
+    getBookHolders: vi.fn(),
+    deleteBook: vi.fn(),
+    getStats: vi.fn(),
+    downloadBackup: vi.fn(),
+  }),
+);
 
 vi.mock('@/hooks/useTranslation', () => ({
   useTranslation: () => (s: string) => s,
@@ -31,7 +34,7 @@ vi.mock('@/services/selfhostedAuth', () => ({
 
 vi.mock('@/admin/adminApi', () => ({
   AdminApiError: class extends Error {},
-  adminApi: { listUsers, listBooks, getBookHolders, deleteBook, getStats },
+  adminApi: { listUsers, listBooks, getBookHolders, deleteBook, getStats, downloadBackup },
 }));
 
 import AdminApp from '@/admin/AdminApp';
@@ -94,6 +97,7 @@ describe('AdminApp users/books observability', () => {
     getBookHolders.mockReset().mockResolvedValue(holders);
     deleteBook.mockReset().mockResolvedValue({ deleted: 1 });
     getStats.mockReset().mockResolvedValue(undefined);
+    downloadBackup.mockReset().mockResolvedValue(undefined);
     localStorage.setItem('token', 'header.payload.sig');
   });
   afterEach(() => {
@@ -151,5 +155,24 @@ describe('AdminApp users/books observability', () => {
         'Delete “{{title}}” from the shared library? No account currently holds it.',
       ),
     ).toBeTruthy();
+  });
+
+  it('downloads the backup from the Maintenance tab', async () => {
+    render(<AdminApp />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Maintenance' }));
+    expect(screen.getByText('Download backup')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Download backup' }));
+    await waitFor(() => expect(downloadBackup).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText('Backup downloaded')).toBeTruthy();
+  });
+
+  it('surfaces a failed backup download as an error', async () => {
+    downloadBackup.mockRejectedValue(
+      Object.assign(new Error('Backup failed (HTTP 500)'), { status: 500 }),
+    );
+    render(<AdminApp />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Maintenance' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Download backup' }));
+    await waitFor(() => expect(screen.getByText(/Backup failed/)).toBeTruthy());
   });
 });

@@ -54,6 +54,7 @@ export default function AdminApp() {
   const [newRole, setNewRole] = useState<'user' | 'admin'>('user');
   const [gcResult, setGcResult] = useState<string>('');
   const [enrichResult, setEnrichResult] = useState<string>('');
+  const [backingUp, setBackingUp] = useState(false);
 
   useEffect(() => {
     const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
@@ -420,6 +421,31 @@ export default function AdminApp() {
         {tab === 'maintenance' && (
           <section className='card bg-base-100 max-w-xl shadow'>
             <div className='card-body gap-4 p-4'>
+              <div>
+                <h2 className='mb-1 text-base font-semibold'>{_('Backup')}</h2>
+                <p className='mb-2 text-xs opacity-60'>
+                  {_(
+                    'Downloads one tar with the database, book files, and the login signing key — unpack it into a fresh data directory to rebuild the server.',
+                  )}
+                </p>
+                <button
+                  className='btn btn-sm'
+                  disabled={backingUp}
+                  onClick={() =>
+                    run(async () => {
+                      setBackingUp(true);
+                      try {
+                        await adminApi.downloadBackup();
+                        return _('Backup downloaded');
+                      } finally {
+                        setBackingUp(false);
+                      }
+                    })
+                  }
+                >
+                  {backingUp ? _('Preparing backup…') : _('Download backup')}
+                </button>
+              </div>
               <div>
                 <h2 className='mb-1 text-base font-semibold'>{_('Blob storage')}</h2>
                 <p className='mb-2 text-xs opacity-60'>

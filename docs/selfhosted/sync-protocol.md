@@ -172,6 +172,7 @@ Edge TTS 依赖微软免费接口（websocket 协议）；Rust 实现可用等�
 | `POST /api/admin/users/<email>/password` | 重置密码：`{"password"}`（空串=免密）或缺省=随机生成仅返回一次；未知 404 |
 | `POST /api/admin/users/<email>/role` | 改角色 `{"role":"admin"|"user"}`；改自己 400 |
 | `POST /api/admin/users/<email>/state` | 停用·启用 `{"disabled":bool}` |
+| `GET /api/admin/backup` | 完整重建备份：流式 tar（`readest.db` VACUUM INTO 快照 + `blobs/` 整目录 + `jwt_secret.key`；env 注入的 secret 无文件时以内存值入档），`Content-Disposition` 文件名 `readest-backup-<UTC时间戳>.tar`；`files/` 不打包（硬链接副本由 blobs 重物化），解包到全新 data_dir 即起、已发客户端 token 不失效；同一时刻仅允许一个备份，进行中再请求 409 |
 
 ### 6.5 元数据代理补强
 

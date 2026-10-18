@@ -76,6 +76,43 @@ describe('adminApi', () => {
     expect(holders[0]?.email).toBe('a@x');
   });
 
+  it('downloadBackup fetches the tar with auth and triggers a named download', async () => {
+    // A real Response: the binary path reads blob() + Content-Disposition.
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('tar-bytes', {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/x-tar',
+          'Content-Disposition': 'attachment; filename="readest-backup-1.tar"',
+        },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const created: number[] = [];
+    const revoked: string[] = [];
+    Object.defineProperty(URL, 'createObjectURL', {
+      value: (blob: Blob) => {
+        created.push(blob.size);
+        return 'blob:mock';
+      },
+      configurable: true,
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      value: (url: string) => {
+        revoked.push(url);
+      },
+      configurable: true,
+    });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    const { adminApi } = await import('@/admin/adminApi');
+    await adminApi.downloadBackup();
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`${BASE}/api/admin/backup`);
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect((init.headers as Record<string, string>)['Authorization']).toBe(`Bearer ${adminJwt}`);
+    expect(created).toEqual(['tar-bytes'.length]);
+    expect(revoked).toEqual(['blob:mock']);
+  });
+
   it('maps 401 to a session-expired error and 403 to admin-required', async () => {
     const { adminApi, AdminApiError } = await import('@/admin/adminApi');
     mockFetch(401, { error: 'x' });

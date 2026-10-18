@@ -91,5 +91,10 @@
   "No accounts hold this book": "No accounts hold this book",
   "(deleted account)": "(deleted account)",
   "Delete “{{title}}”? Held by {{count}} account(s) — every stored copy is removed.": "Delete “{{title}}”? Held by {{count}} account(s) — every stored copy is removed.",
-  "Delete “{{title}}” from the shared library? No account currently holds it.": "Delete “{{title}}” from the shared library? No account currently holds it."
+  "Delete “{{title}}” from the shared library? No account currently holds it.": "Delete “{{title}}” from the shared library? No account currently holds it.",
+  "Backup": "Backup",
+  "Downloads one tar with the database, book files, and the login signing key — unpack it into a fresh data directory to rebuild the server.": "Downloads one tar with the database, book files, and the login signing key — unpack it into a fresh data directory to rebuild the server.",
+  "Download backup": "Download backup",
+  "Preparing backup…": "Preparing backup…",
+  "Backup downloaded": "Backup downloaded"
 }

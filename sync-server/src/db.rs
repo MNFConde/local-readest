@@ -27,6 +27,9 @@ pub struct AppState {
     pub host_snapshot: Mutex<Option<HostSnapshotEntry>>,
     /// Process start, for the admin stats endpoint's uptime figure.
     pub started_at: std::time::Instant,
+    /// True while a backup tar is streaming; a second concurrent backup is
+    /// refused (both would race on the tmp VACUUM snapshot path).
+    pub backup_busy: std::sync::atomic::AtomicBool,
 }
 
 pub type SharedState = std::sync::Arc<AppState>;

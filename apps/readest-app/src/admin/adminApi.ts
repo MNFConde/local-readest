@@ -110,7 +110,8 @@ function authHeader(): Record<string, string> {
   return { Authorization: `Bearer ${token}` };
 }
 
-async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
+/** Shared transport: base URL, auth header, and the 401/403 mapping. */
+async function adminFetchRaw(path: string, init?: RequestInit): Promise<Response> {
   const baseUrl = getSelfhostedServerUrl();
   if (!baseUrl) {
     throw new AdminApiError('Sync server URL is not configured', 0);
@@ -137,6 +138,11 @@ async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
   if (res.status === 403) {
     throw new AdminApiError('Admin access required', 403);
   }
+  return res;
+}
+
+async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await adminFetchRaw(path, init);
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     let message = `Request failed (HTTP ${res.status})`;
@@ -213,4 +219,26 @@ export const adminApi = {
 
   /** Aggregated overview numbers (counts, disk sizes, version, uptime). */
   getStats: () => adminFetch<ServerStats>('/stats'),
+
+  /**
+   * Downloads the full-server backup tar (GET /backup) as a file. Binary, so
+   * it bypasses the JSON adminFetch; the auth header rules out a plain link,
+   * hence fetch → blob → anchor click.
+   */
+  downloadBackup: async (): Promise<void> => {
+    const res = await adminFetchRaw('/backup');
+    if (!res.ok) {
+      throw new AdminApiError(`Backup failed (HTTP ${res.status})`, res.status);
+    }
+    const blob = await res.blob();
+    const name =
+      /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') ?? '')?.[1] ??
+      'readest-backup.tar';
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = name;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  },
 };
