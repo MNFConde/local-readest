@@ -26,7 +26,7 @@
 
 ## 受保护文件与守卫
 
-`scripts/selfhost/check-decoupling.mjs`(`pnpm check:decoupling`,CI 在 `.github/workflows/selfhost-checks.yml`):translation.json 与上游有 diff 直接失败;下述共享文件改动行数(相对上游 merge-base 的增+删)超预算警告:
+`scripts/selfhost/check-decoupling.mjs`(`pnpm check:decoupling`,CI 在 `.github/workflows/selfhost-checks.yml`):translation.json 与上游有 diff 直接失败;下述共享文件改动行数(相对上游 merge-base 的增+删)超预算在 CI 硬失败(`--strict`,2026-10-18 启用;本地默认仍为警告):
 
 - 接缝根:`src/utils/supabase.ts`、`src/services/environment.ts`、`src/i18n/i18n.ts`
 - 五个已收敛接缝:`EmailPasswordAuth.tsx`、`AuthContext.tsx`、`library/page.tsx`、`libraryService.ts`、`libs/storage.ts`、`helpers/auth.ts`

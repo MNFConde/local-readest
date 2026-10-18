@@ -43,7 +43,7 @@ pnpm install                          # 根 workspace
 ## 解耦守卫(scripts/selfhost/check-decoupling.mjs)
 
 - **硬失败**:任何 `apps/readest-app/public/locales/*/translation.json` 与上游 merge-base 有 diff。
-- **预算警告**:受保护共享文件改动行数(增+删)超预算;跑稳一个合并周期后以 `--strict`(`DECOUPLING_STRICT=1`)升为硬失败。
+- **预算硬失败(CI)**:受保护共享文件改动行数(增+删)超预算即失败——2026-10-18 起在 selfhost-checks.yml 以 `--strict` 强制(首个合并周期 ① 走稳后升级;本地 `pnpm check:decoupling` 默认仍为警告,合并前后手动各跑一次)。
 - **表外报告**:修改了预算表之外的上游文件会列出提醒——新动上游文件必须同步登记预算。
 - CI:`.github/workflows/selfhost-checks.yml`(decoupling job + cargo audit 硬闸 + pnpm audit 报告级)。
 

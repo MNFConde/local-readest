@@ -24,7 +24,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: node scripts/selfhost/check-decoupling.mjs
+      # Budgets are hard-enforced since 2026-10-18: the first full upstream
+      # merge cycle (0.12.16) ran green and its one over-budget event was
+      # resolved by seam extraction, not by loosening.
+      - run: node scripts/selfhost/check-decoupling.mjs --strict
 
   audit:
     name: Security audits
