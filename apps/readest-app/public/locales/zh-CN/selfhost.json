@@ -72,5 +72,18 @@
   "Importing shelves the book for this account; files are shared on the device and are not copied.": "导入只是把书加入本账号书架;文件在设备上按内容共享,不会复制。",
   "Import {{count}} book(s)": "导入 {{count}} 本书",
   "Imported {{count}} book(s) from the guest shelf": "已从访客书架导入 {{count}} 本书",
-  "Failed to import from the guest shelf.": "从访客书架导入失败。"
+  "Failed to import from the guest shelf.": "从访客书架导入失败。",
+  "Overview": "总览",
+  "Synced books": "同步书目",
+  "across all accounts": "所有账号合计",
+  "Catalog books": "书目目录",
+  "{{works}} works": "{{works}} 部作品",
+  "Stored files": "文件存储",
+  "per-account copies": "各账号副本合计",
+  "Blob store": "Blob 存储",
+  "{{count}} blobs": "{{count}} 个 blob",
+  "Dedup savings": "去重节省",
+  "stored once instead of per copy": "相同内容只存一份",
+  "{{admins}} admin · {{disabled}} disabled": "{{admins}} 管理员 · {{disabled}} 停用",
+  "sync-server v{{version}} · up {{uptime}} · database {{db}}": "sync-server v{{version}} · 已运行 {{uptime}} · 数据库 {{db}}"
 }

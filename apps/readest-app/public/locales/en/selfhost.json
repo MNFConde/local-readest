@@ -72,5 +72,18 @@
   "Importing shelves the book for this account; files are shared on the device and are not copied.": "Importing shelves the book for this account; files are shared on the device and are not copied.",
   "Import {{count}} book(s)": "Import {{count}} book(s)",
   "Imported {{count}} book(s) from the guest shelf": "Imported {{count}} book(s) from the guest shelf",
-  "Failed to import from the guest shelf.": "Failed to import from the guest shelf."
+  "Failed to import from the guest shelf.": "Failed to import from the guest shelf.",
+  "Overview": "Overview",
+  "Synced books": "Synced books",
+  "across all accounts": "across all accounts",
+  "Catalog books": "Catalog books",
+  "{{works}} works": "{{works}} works",
+  "Stored files": "Stored files",
+  "per-account copies": "per-account copies",
+  "Blob store": "Blob store",
+  "{{count}} blobs": "{{count}} blobs",
+  "Dedup savings": "Dedup savings",
+  "stored once instead of per copy": "stored once instead of per copy",
+  "{{admins}} admin · {{disabled}} disabled": "{{admins}} admin · {{disabled}} disabled",
+  "sync-server v{{version}} · up {{uptime}} · database {{db}}": "sync-server v{{version}} · up {{uptime}} · database {{db}}"
 }

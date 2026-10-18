@@ -40,6 +40,8 @@ pub fn router(state: SharedState) -> Router<SharedState> {
             "/host-snapshot",
             get(get_host_snapshot).post(post_host_snapshot),
         )
+        // Aggregate overview numbers for the admin console's Overview tab.
+        .route("/stats", get(get_stats))
         .with_state(state)
 }
 
@@ -739,4 +741,106 @@ async fn get_host_snapshot(
         }))
         .into_response(),
     })
+}
+
+// ── aggregate stats (admin console overview tab) ────────────────────────────
+// One read-only endpoint feeding the admin page's overview cards: account and
+// catalog counts, on-disk sizes, dedup savings, server version + uptime.
+// Contract: docs/selfhosted/sync-protocol.md §6.7.
+//
+// files_bytes sums every per-uid copy at full size (hard links report full
+// size, matching the quota walk), so files_bytes − blobs_bytes is exactly the
+// disk the content-addressed blob store saves. db_bytes covers the SQLite
+// file plus WAL/SHM sidecars as they sit on disk.
+
+async fn get_stats(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    require_admin(&state, &headers).await?;
+
+    let ((users_total, users_admins, users_disabled), books_synced, catalog_books, works) = {
+        let conn = state
+            .db
+            .lock()
+            .map_err(|_| super::admin_error("db lock poisoned"))?;
+        let (t, a, d) = conn
+            .query_row(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(role = 'admin'), 0),
+                        COALESCE(SUM(disabled), 0)
+                 FROM users",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .map_err(super::admin_error)?;
+        let one = |sql: &str| -> Result<i64, rusqlite::Error> {
+            conn.query_row(sql, [], |r| r.get::<_, i64>(0))
+        };
+        let synced = one("SELECT COUNT(*) FROM books WHERE deleted_at IS NULL")
+            .map_err(super::admin_error)?;
+        let catalog = one("SELECT COUNT(*) FROM catalog_books").map_err(super::admin_error)?;
+        let works = one("SELECT COUNT(*) FROM works").map_err(super::admin_error)?;
+        ((t, a, d), synced, catalog, works)
+    };
+
+    let mut files = Vec::new();
+    collect_files(&state.cfg.files_root(), &mut String::new(), &mut files);
+    let files_bytes: u64 = files
+        .iter()
+        .filter_map(|(_, path)| path.metadata().ok())
+        .map(|m| m.len())
+        .sum();
+
+    // The blob store is flat: one file per content hash.
+    let (mut blobs_bytes, mut blobs_count) = (0u64, 0u64);
+    if let Ok(entries) = std::fs::read_dir(state.cfg.blobs_root()) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(true) {
+                continue;
+            }
+            if let Ok(meta) = entry.metadata() {
+                blobs_bytes += meta.len();
+                blobs_count += 1;
+            }
+        }
+    }
+
+    let db_path = state.cfg.db_path();
+    let db_bytes: u64 = ["", "-wal", "-shm"]
+        .iter()
+        .filter_map(|suffix| std::fs::metadata(format!("{}{suffix}", db_path.display())).ok())
+        .map(|m| m.len())
+        .sum();
+
+    Ok(Json(json!({
+        "users": {
+            "total": users_total,
+            "admins": users_admins,
+            "disabled": users_disabled,
+        },
+        "books": {
+            "synced": books_synced,
+            "catalog": catalog_books,
+            "works": works,
+        },
+        "storage": {
+            "files_bytes": files_bytes,
+            "blobs_bytes": blobs_bytes,
+            "blobs_count": blobs_count,
+            "db_bytes": db_bytes,
+            "dedup_saved_bytes": files_bytes.saturating_sub(blobs_bytes),
+        },
+        "server": {
+            "version": env!("CARGO_PKG_VERSION"),
+            "uptime_secs": state.started_at.elapsed().as_secs(),
+        },
+    }))
+    .into_response())
 }

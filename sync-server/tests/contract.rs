@@ -37,6 +37,7 @@ pub fn test_state(cfg: Config) -> SharedState {
         cfg,
         login_limiter: Mutex::new(sync_server::ratelimit::LoginLimiter::new()),
         host_snapshot: Mutex::new(None),
+        started_at: std::time::Instant::now(),
     })
 }
 
@@ -2012,4 +2013,84 @@ async fn admin_host_snapshot_store_query_and_auth() {
     assert_eq!(body["snapshot"], snapshot);
     assert!(body["received_at"].as_u64().unwrap() > 0);
     assert!(body["age_secs"].as_u64().unwrap() < 60);
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn admin_stats_counts_sizes_and_auth() {
+    let mut cfg = test_config("admin-stats");
+    cfg.admin_token = Some("op-token-123".into());
+    let files_root = cfg.files_root();
+    let blobs_root = cfg.blobs_root();
+    let state = test_state(cfg);
+
+    // Seed: two accounts (one admin), three synced entries for A (one
+    // deleted) plus one for B, one catalog book grouped under one work.
+    let uid_a = seed_user(&state, "stats-a@x.com", "code-stats-a1");
+    let uid_b = seed_user(&state, "stats-b@x.com", "code-stats-b2");
+    {
+        let conn = state.db.lock().unwrap();
+        conn.execute(
+            "UPDATE users SET role = 'admin' WHERE id = ?1",
+            rusqlite::params![uid_a],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO books (user_id, book_hash, deleted_at) VALUES
+             (?1, 'h1', NULL), (?1, 'h2', NULL), (?1, 'h3', 1)",
+            rusqlite::params![uid_a],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO books (user_id, book_hash) VALUES (?1, 'h1')",
+            rusqlite::params![uid_b],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO catalog_books (hash, title, added_at, added_by, work_id)
+             VALUES ('h1', 'T', '2026-01-01T00:00:00Z', 'stats-a@x.com', 'w1')",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO works (id) VALUES ('w1')", [])
+            .unwrap();
+    }
+
+    // One 100-byte stored copy under A's files tree and one 60-byte blob:
+    // dedup saving must come out as exactly 40 bytes.
+    let book_dir = files_root.join(format!("{uid_a}/Readest/Books/h1"));
+    std::fs::create_dir_all(&book_dir).unwrap();
+    std::fs::write(book_dir.join("book.epub"), vec![0u8; 100]).unwrap();
+    std::fs::create_dir_all(&blobs_root).unwrap();
+    std::fs::write(blobs_root.join("deadbeef"), vec![0u8; 60]).unwrap();
+
+    // No credential → 401.
+    let app = routes::router(state);
+    let (status, _, _) = admin_request(app.clone(), "GET", "/api/admin/stats", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, body, _) =
+        admin_request(app, "GET", "/api/admin/stats", Some("op-token-123"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["users"],
+        json!({ "total": 2, "admins": 1, "disabled": 0 })
+    );
+    assert_eq!(
+        body["books"],
+        json!({ "synced": 3, "catalog": 1, "works": 1 })
+    );
+    assert_eq!(
+        body["storage"],
+        json!({
+            "files_bytes": 100,
+            "blobs_bytes": 60,
+            "blobs_count": 1,
+            // in-memory test DB: no file on disk
+            "db_bytes": 0,
+            "dedup_saved_bytes": 40,
+        })
+    );
+    assert_eq!(body["server"]["version"], env!("CARGO_PKG_VERSION"));
+    assert!(body["server"]["uptime_secs"].as_u64().unwrap() < 60);
 }

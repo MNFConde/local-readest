@@ -25,6 +25,8 @@ pub struct AppState {
     /// Newest supervisor metrics snapshot, if the supervisor ever delivered
     /// one (None = "not connected" for the admin page's server monitor).
     pub host_snapshot: Mutex<Option<HostSnapshotEntry>>,
+    /// Process start, for the admin stats endpoint's uptime figure.
+    pub started_at: std::time::Instant,
 }
 
 pub type SharedState = std::sync::Arc<AppState>;

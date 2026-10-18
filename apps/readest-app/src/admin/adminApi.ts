@@ -71,6 +71,24 @@ export interface HostSnapshotQuery {
   snapshot?: HostSnapshot;
 }
 
+// ── aggregate overview stats (sync-protocol.md §6.7) ───────────────────────
+// One read-only /api/admin/stats payload feeding the Overview tab's cards.
+// Snake_case mirrors the server's JSON verbatim (same convention as the
+// host-snapshot feed).
+
+export interface ServerStats {
+  users: { total: number; admins: number; disabled: number };
+  books: { synced: number; catalog: number; works: number };
+  storage: {
+    files_bytes: number;
+    blobs_bytes: number;
+    blobs_count: number;
+    db_bytes: number;
+    dedup_saved_bytes: number;
+  };
+  server: { version: string; uptime_secs: number };
+}
+
 function authHeader(): Record<string, string> {
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
   if (!token) {
@@ -173,4 +191,7 @@ export const adminApi = {
 
   /** Newest supervisor metrics snapshot; available=false when not connected. */
   getHostSnapshot: () => adminFetch<HostSnapshotQuery>('/host-snapshot'),
+
+  /** Aggregated overview numbers (counts, disk sizes, version, uptime). */
+  getStats: () => adminFetch<ServerStats>('/stats'),
 };

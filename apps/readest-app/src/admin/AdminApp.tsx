@@ -10,10 +10,11 @@ import { useTranslation } from '@/hooks/useTranslation';
 import { jwtRole, jwtToUser } from '@/services/selfhostedAuth';
 import { adminApi, AdminApiError, AdminUser, CatalogBook } from './adminApi';
 import HostMonitorSection from './HostMonitorSection';
+import StatsSection from './StatsSection';
 
 type Gate = 'checking' | 'ok' | 'denied' | 'anon';
 
-type Tab = 'users' | 'books' | 'monitor' | 'maintenance';
+type Tab = 'overview' | 'users' | 'books' | 'monitor' | 'maintenance';
 
 type Dialog =
   | { kind: 'delete-user'; email: string }
@@ -32,7 +33,7 @@ export default function AdminApp() {
   const _ = useTranslation('selfhost');
   const [gate, setGate] = useState<Gate>('checking');
   const [selfEmail, setSelfEmail] = useState<string>('');
-  const [tab, setTab] = useState<Tab>('users');
+  const [tab, setTab] = useState<Tab>('overview');
   const [users, setUsers] = useState<AdminUser[] | null>(null);
   const [books, setBooks] = useState<CatalogBook[] | null>(null);
   const [ungroupedOnly, setUngroupedOnly] = useState(false);
@@ -184,6 +185,7 @@ export default function AdminApp() {
         <div role='tablist' className='tabs-box tabs mb-4 w-fit'>
           {(
             [
+              ['overview', _('Overview')],
               ['users', _('Users')],
               ['books', _('Books')],
               ['monitor', _('Server Monitor')],
@@ -200,6 +202,8 @@ export default function AdminApp() {
             </button>
           ))}
         </div>
+
+        {tab === 'overview' && <StatsSection />}
 
         {tab === 'users' && (
           <section>

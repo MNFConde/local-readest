@@ -211,6 +211,33 @@ Edge TTS 依赖微软免费接口（websocket 协议）；Rust 实现可用等�
 
 **防环铁律**（supervisor 与本端点的边界）：控制权只在 supervisor（服务端只存数、不给数、不下令）；探活直连各服务端口、绝不借道兄弟进程；推送失败只记日志、保留旧快照，永不参与重启决策。管理页在 `available:false` 时按「管理层未接入」降级展示，其余管理功能不受影响。
 
+### 6.7 管理页聚合统计 /api/admin/stats（管理页可观测性）
+
+一个只读端点喂饱管理页「总览」标签页的卡片：账号/目录计数、磁盘占用、blob 去重节省、版本与运行时长。鉴权双轨同 §6.4；无状态实时统计、不缓存，客户端 60 秒轮询。
+
+| 端点 | 说明 |
+|---|---|
+| `GET /api/admin/stats` | 聚合统计快照（只读；字段只增不改） |
+
+响应形状：
+
+```json
+{
+  "users": { "total": 3, "admins": 1, "disabled": 1 },
+  "books": { "synced": 12, "catalog": 5, "works": 2 },
+  "storage": {
+    "files_bytes": 2500000,
+    "blobs_bytes": 1500000,
+    "blobs_count": 4,
+    "db_bytes": 81920,
+    "dedup_saved_bytes": 1000000
+  },
+  "server": { "version": "0.12.16", "uptime_secs": 3600 }
+}
+```
+
+语义：`books.synced` = 各账号在读书目条目数（`books` 表未删除行）；`books.catalog` / `works` = 共享目录行数与作品数。`storage.files_bytes` 按每账号副本**全尺寸**累计（硬链接也计全尺寸，与配额口径一致）；`blobs_bytes` / `blobs_count` = 内容寻址 blob 库实际占用；**`dedup_saved_bytes` = `files_bytes` − `blobs_bytes`**，即去重省下的磁盘；`db_bytes` = SQLite 主库 + WAL/SHM 旁路文件。`server.version` = sync-server crate 版本，`uptime_secs` = 进程运行时长。
+
 ## 7. 服务端配置（本项目 env 集）
 
 | env | 缺省 | 说明 |

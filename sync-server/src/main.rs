@@ -159,6 +159,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         cfg,
         login_limiter: Mutex::new(sync_server::ratelimit::LoginLimiter::new()),
         host_snapshot: Mutex::new(None),
+        started_at: std::time::Instant::now(),
     });
 
     let addr = state.cfg.listen_addr.clone();
