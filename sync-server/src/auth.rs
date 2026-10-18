@@ -38,11 +38,19 @@ impl FromRequestParts<SharedState> for AuthUser {
             return Err(unauthorized("missing token"));
         };
         match jwt::verify(&state.cfg.jwt_secret, token) {
-            Ok(claims) => Ok(AuthUser {
-                id: claims.sub,
-                email: claims.email,
-                plan: claims.plan,
-            }),
+            Ok(claims) => {
+                // Activity stamp for the admin users list: throttled inside
+                // the UPDATE and best-effort — never blocks the request.
+                let _ = crate::routes::with_db(state, |conn| {
+                    users::touch_last_seen(conn, &claims.sub, users::now_unix())
+                        .map_err(crate::error::ApiError::server)
+                });
+                Ok(AuthUser {
+                    id: claims.sub,
+                    email: claims.email,
+                    plan: claims.plan,
+                })
+            }
             Err(_) => Err(unauthorized("invalid token")),
         }
     }
@@ -147,6 +155,11 @@ pub async fn login(
                 .lock()
                 .expect("login limiter mutex poisoned")
                 .record_success(&identity);
+            // Activity stamp for the admin users list; best-effort.
+            let _ = crate::routes::with_db(&state, |conn| {
+                users::touch_last_seen(conn, &user.id, users::now_unix())
+                    .map_err(crate::error::ApiError::server)
+            });
             match jwt::issue(
                 &state.cfg.jwt_secret,
                 &user.id,

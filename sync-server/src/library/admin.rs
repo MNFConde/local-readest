@@ -9,7 +9,7 @@
 //! answers 401 (403 for a valid non-admin JWT). Account creation used to be
 //! CLI-only; it is available both places now.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path as FsPath, PathBuf};
 
 use axum::extract::{Path, State};
@@ -26,6 +26,8 @@ pub fn router(state: SharedState) -> Router<SharedState> {
     Router::new()
         .route("/books", get(list_books))
         .route("/books/{hash}", post(update_book).delete(delete_book))
+        // Who holds this content — the delete-impact view for the console.
+        .route("/books/{hash}/holders", get(book_holders))
         .route("/works", get(list_works).post(create_work))
         .route("/enrich", post(enrich))
         .route("/gc", post(gc))
@@ -111,7 +113,9 @@ async fn list_books(
         .map_err(|_| super::admin_error("db lock poisoned"))?;
     let mut stmt = conn
         .prepare(
-            "SELECT hash, title, author, language, work_id, source_hash, added_at, added_by
+            "SELECT hash, title, author, language, work_id, source_hash, added_at, added_by,
+                    (SELECT COUNT(*) FROM books b
+                     WHERE b.book_hash = catalog_books.hash AND b.deleted_at IS NULL)
              FROM catalog_books ORDER BY added_at DESC",
         )
         .map_err(super::admin_error)?;
@@ -126,12 +130,53 @@ async fn list_books(
                 "sourceHash": r.get::<_, Option<String>>(5)?,
                 "addedAt": r.get::<_, String>(6)?,
                 "addedBy": r.get::<_, String>(7)?,
+                "holders": r.get::<_, i64>(8)?,
             }))
         })
         .map_err(super::admin_error)?
         .flatten()
         .collect::<Vec<_>>();
     Ok(Json(json!({ "books": rows })).into_response())
+}
+
+/// GET /api/admin/books/{hash}/holders — every per-user library row for this
+/// content: the impact surface shown before a catalog deletion. Deleted rows
+/// are included but flagged (their file copies may already be gone); the user
+/// account itself may be gone too, hence the LEFT JOIN.
+async fn book_holders(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(hash): Path<String>,
+) -> Result<Response, Response> {
+    require_admin(&state, &headers).await?;
+    if !is_safe_hash(&hash) {
+        return Err(StatusCode::BAD_REQUEST.into_response());
+    }
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| super::admin_error("db lock poisoned"))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT b.user_id, u.email, b.deleted_at, b.synced_at
+             FROM books b LEFT JOIN users u ON u.id = b.user_id
+             WHERE b.book_hash = ?1
+             ORDER BY (b.deleted_at IS NULL) DESC, u.email",
+        )
+        .map_err(super::admin_error)?;
+    let rows = stmt
+        .query_map(params![hash], |r| {
+            Ok(json!({
+                "userId": r.get::<_, String>(0)?,
+                "email": r.get::<_, Option<String>>(1)?,
+                "deleted": r.get::<_, Option<i64>>(2)?.is_some(),
+                "syncedAt": r.get::<_, Option<String>>(3)?,
+            }))
+        })
+        .map_err(super::admin_error)?
+        .flatten()
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "holders": rows })).into_response())
 }
 
 async fn update_book(
@@ -331,6 +376,28 @@ async fn list_users(
         .lock()
         .map_err(|_| super::admin_error("db lock poisoned"))?;
     let rows = crate::users::list_users(&conn).map_err(super::admin_error)?;
+    // Activity stamps live in their own column (users::list_users keeps its
+    // CLI-facing 5-tuple shape), and per-user storage is one walk over
+    // files_root grouped by the leading uid path segment — full size per
+    // copy, the same semantics as the quota walk.
+    let mut stmt = conn
+        .prepare("SELECT id, last_seen_at FROM users")
+        .map_err(super::admin_error)?;
+    let last_seen: HashMap<String, Option<i64>> = stmt
+        .query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
+        })
+        .map_err(super::admin_error)?
+        .flatten()
+        .collect();
+    let mut used: HashMap<String, u64> = HashMap::new();
+    let mut files = Vec::new();
+    collect_files(&state.cfg.files_root(), &mut String::new(), &mut files);
+    for (key, path) in files {
+        if let (Some(uid), Ok(meta)) = (key.split('/').next(), path.metadata()) {
+            *used.entry(uid.to_string()).or_insert(0) += meta.len();
+        }
+    }
     let users: Vec<Value> = rows
         .iter()
         .map(|(email, id, disabled, created, role)| {
@@ -340,6 +407,8 @@ async fn list_users(
                 "disabled": disabled,
                 "createdAt": created,
                 "role": role,
+                "bytesUsed": used.get(id.as_str()).copied().unwrap_or(0),
+                "lastSeenAt": last_seen.get(id.as_str()).copied().flatten(),
             })
         })
         .collect();

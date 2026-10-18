@@ -43,7 +43,8 @@ const SCHEMA: &str = r#"
         plan TEXT NOT NULL DEFAULT 'pro',
         disabled INTEGER NOT NULL DEFAULT 0,
         role TEXT NOT NULL DEFAULT 'user',
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        last_seen_at INTEGER
     );
     CREATE TABLE IF NOT EXISTS books (
         id TEXT, user_id TEXT, book_hash TEXT, meta_hash TEXT,
@@ -119,6 +120,9 @@ pub fn open_db_in_memory() -> anyhow::Result<Connection> {
 fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
     if !table_has_column(conn, "users", "role")? {
         conn.execute_batch("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")?;
+    }
+    if !table_has_column(conn, "users", "last_seen_at")? {
+        conn.execute_batch("ALTER TABLE users ADD COLUMN last_seen_at INTEGER")?;
     }
     Ok(())
 }

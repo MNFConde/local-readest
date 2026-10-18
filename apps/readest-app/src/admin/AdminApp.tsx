@@ -8,7 +8,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from '@/hooks/useTranslation';
 import { jwtRole, jwtToUser } from '@/services/selfhostedAuth';
-import { adminApi, AdminApiError, AdminUser, CatalogBook } from './adminApi';
+import { adminApi, AdminApiError, AdminUser, BookHolder, CatalogBook } from './adminApi';
+import { humanBytes } from './format';
 import HostMonitorSection from './HostMonitorSection';
 import StatsSection from './StatsSection';
 
@@ -20,6 +21,7 @@ type Dialog =
   | { kind: 'delete-user'; email: string }
   | { kind: 'reset-password'; email: string }
   | { kind: 'delete-book'; book: CatalogBook }
+  | { kind: 'holders'; book: CatalogBook }
   | { kind: 'show-password'; password: string; generated: boolean }
   | null;
 
@@ -27,6 +29,11 @@ function formatCreated(unix: string): string {
   const secs = Number(unix);
   if (!Number.isFinite(secs) || secs <= 0) return unix;
   return new Date(secs * 1000).toLocaleString();
+}
+
+function formatLastSeen(unix: number | null): string {
+  if (!unix || unix <= 0) return '';
+  return new Date(unix * 1000).toLocaleString();
 }
 
 export default function AdminApp() {
@@ -257,6 +264,8 @@ export default function AdminApp() {
                       <th>{_('Role')}</th>
                       <th>{_('Status')}</th>
                       <th>{_('Created')}</th>
+                      <th>{_('Storage')}</th>
+                      <th>{_('Last active')}</th>
                       <th></th>
                     </tr>
                   </thead>
@@ -279,6 +288,10 @@ export default function AdminApp() {
                           </span>
                         </td>
                         <td className='text-xs opacity-70'>{formatCreated(u.createdAt)}</td>
+                        <td className='whitespace-nowrap text-xs'>{humanBytes(u.bytesUsed)}</td>
+                        <td className='whitespace-nowrap text-xs opacity-70'>
+                          {formatLastSeen(u.lastSeenAt) || _('Never')}
+                        </td>
                         <td className='whitespace-nowrap text-right'>
                           <button
                             className='btn btn-ghost btn-xs'
@@ -359,6 +372,7 @@ export default function AdminApp() {
                       <th>{_('Author')}</th>
                       <th>{_('Language')}</th>
                       <th>{_('Hash')}</th>
+                      <th>{_('Holders')}</th>
                       <th>{_('Added by')}</th>
                       <th></th>
                     </tr>
@@ -372,6 +386,14 @@ export default function AdminApp() {
                           <td className='text-xs'>{b.author}</td>
                           <td className='text-xs opacity-70'>{b.language}</td>
                           <td className='font-mono text-xs opacity-60'>{b.hash.slice(0, 10)}…</td>
+                          <td>
+                            <button
+                              className='btn btn-ghost btn-xs'
+                              onClick={() => setDialog({ kind: 'holders', book: b })}
+                            >
+                              {b.holders}
+                            </button>
+                          </td>
                           <td className='font-mono text-xs opacity-60'>{b.addedBy}</td>
                           <td className='text-right'>
                             <button
@@ -534,13 +556,25 @@ export default function AdminApp() {
         </Modal>
       )}
 
+      {dialog?.kind === 'holders' && (
+        <HoldersDialog book={dialog.book} onClose={() => setDialog(null)} />
+      )}
+
       {dialog?.kind === 'delete-book' && (
         <Modal onClose={() => setDialog(null)}>
           <h3 className='mb-2 text-lg font-bold'>{_('Delete book')}</h3>
           <p className='mb-4 text-sm'>
-            {_('Delete “{{title}}” from the shared library? All stored copies are removed.', {
-              title: dialog.book.title || dialog.book.hash.slice(0, 10),
-            })}
+            {dialog.book.holders > 0
+              ? _(
+                  'Delete “{{title}}”? Held by {{count}} account(s) — every stored copy is removed.',
+                  {
+                    title: dialog.book.title || dialog.book.hash.slice(0, 10),
+                    count: dialog.book.holders,
+                  },
+                )
+              : _('Delete “{{title}}” from the shared library? No account currently holds it.', {
+                  title: dialog.book.title || dialog.book.hash.slice(0, 10),
+                })}
           </p>
           <div className='modal-action'>
             <button className='btn btn-ghost btn-sm' onClick={() => setDialog(null)}>
@@ -580,5 +614,60 @@ function Modal({ children, onClose }: { children: React.ReactNode; onClose: () =
       <div className='modal-box max-w-md'>{children}</div>
       <button className='modal-backdrop' onClick={onClose} aria-label='close' />
     </div>
+  );
+}
+
+function HoldersDialog({ book, onClose }: { book: CatalogBook; onClose: () => void }) {
+  const _ = useTranslation('selfhost');
+  const [holders, setHolders] = useState<BookHolder[] | null>(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    adminApi
+      .getBookHolders(book.hash)
+      .then((list) => {
+        if (alive) setHolders(list);
+      })
+      .catch((e) => {
+        if (alive) setError(e instanceof AdminApiError ? e.message : String(e));
+      });
+    return () => {
+      alive = false;
+    };
+  }, [book.hash]);
+
+  return (
+    <Modal onClose={onClose}>
+      <h3 className='mb-1 text-lg font-bold'>{_('Holders')}</h3>
+      <p className='mb-3 font-mono text-xs opacity-70'>{book.title || book.hash.slice(0, 10)}</p>
+      {error && <p className='mb-3 text-sm text-error'>{error}</p>}
+      {!error && holders === null && <p className='mb-3 text-sm opacity-70'>{_('Loading…')}</p>}
+      {holders !== null && holders.length === 0 && (
+        <p className='mb-3 text-sm opacity-60'>{_('No accounts hold this book')}</p>
+      )}
+      {holders !== null && holders.length > 0 && (
+        <ul className='mb-4 flex flex-col gap-1 text-sm'>
+          {holders.map((h) => (
+            <li
+              key={`${h.userId}:${h.deleted}`}
+              className='flex items-center justify-between gap-2'
+            >
+              <span className='font-mono text-xs'>{h.email ?? _('(deleted account)')}</span>
+              {h.deleted ? (
+                <span className='badge badge-ghost badge-sm'>{_('Deleted')}</span>
+              ) : (
+                <span className='badge badge-success badge-sm'>{_('Active')}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className='modal-action'>
+        <button className='btn btn-sm' onClick={onClose}>
+          {_('Close')}
+        </button>
+      </div>
+    </Modal>
   );
 }

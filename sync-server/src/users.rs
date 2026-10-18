@@ -194,6 +194,25 @@ pub fn set_disabled(conn: &Connection, email: &str, disabled: bool) -> anyhow::R
     Ok(n > 0)
 }
 
+pub fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Best-effort activity stamp for the admin users list. Throttled inside the
+/// UPDATE (at most one write per user per minute) so frequent authenticated
+/// requests don't churn the WAL; a missed stamp never fails the request.
+pub fn touch_last_seen(conn: &Connection, id: &str, now_unix: i64) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE users SET last_seen_at = ?1
+         WHERE id = ?2 AND (last_seen_at IS NULL OR last_seen_at < ?1 - 60)",
+        params![now_unix, id],
+    )?;
+    Ok(())
+}
+
 /// Promote/demote between "admin" and "user". Returns false when the email
 /// is unknown; an invalid role is the caller's (handler's) 400.
 pub fn set_role(conn: &Connection, email: &str, role: &str) -> anyhow::Result<bool> {

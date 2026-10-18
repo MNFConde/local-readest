@@ -19,7 +19,7 @@
 - `src/utils/supabase.ts`：`NEXT_PUBLIC_SELFHOSTED=1` 开关；selfhost 下 supabase client 为 null（调用点 `supabase!`）
 - `src/utils/access.ts`、`src/helpers/auth.ts`、`src/context/AuthContext.tsx`：token/用户派生走 JWT `sub`；过期后用持久化账号密码静默重登
 - `src/app/auth/*`（AuthPanel / EmailPasswordAuth / page / recovery / update）：登录 UI——服务端地址框 + 账号（邮箱）框 + 密码框（可空），隐藏 OAuth
-- `src/admin/`（自包含管理页子树）+ `src/app/admin/page.tsx`（单路由挂载）：多端管理控制台（建/删用户、重置密码、角色、停用启用、删除书目、blob GC、Open Library 自动归组），admin 账号在 web/桌面/安卓任意端访问 `/admin`；**工程约束**：只依赖 node_modules 的 daisyUI/Radix 与 fork 自有模块（`selfhostedAuth.jwtRole` 解码 role claim），不 import 上游业务组件，上游合并冲突面≈0
+- `src/admin/`（自包含管理页子树）+ `src/app/admin/page.tsx`（单路由挂载）：多端管理控制台（建/删用户、重置密码、角色、停用启用、删除书目、blob GC、Open Library 自动归组；用户表带存储用量/最后活跃列——`bytesUsed` 按每账号副本全尺寸、`lastSeenAt` 登录与已鉴权请求节流盖章 ≤1 次/分钟；书目表带持有数与「持有者」弹窗、删除确认显示影响面——契约见 sync-protocol.md §6.4），admin 账号在 web/桌面/安卓任意端访问 `/admin`；**工程约束**：只依赖 node_modules 的 daisyUI/Radix 与 fork 自有模块（`selfhostedAuth.jwtRole` 解码 role claim），不 import 上游业务组件，上游合并冲突面≈0
 - `src/admin/AdminConsoleMenuItem.tsx`（admin 子树内）+ `src/app/library/components/SettingsMenu.tsx` 的两行挂载：设置菜单「管理控制台」入口——仅 `NEXT_PUBLIC_SELFHOSTED=1` 且所存 JWT 带 `role=admin` 时渲染（登录/登出后无需刷新页面即出现/消失；role 只做 UI 门，`/api/admin` 服务端才是闸）；URL 直达 `/admin` 仍是兼容方式
 - `src/admin/HostMonitorSection.tsx`（admin 子树内，待办⑦）：管理页「服务监控」标签页——轮询 `GET /api/admin/host-snapshot` 渲染 supervisor 推来的双服务状态/延迟/内存/CPU；无 supervisor 数据时降级为「管理层未接入」提示（发布包外部署管理页其余功能不受影响）
 - `src/admin/StatsSection.tsx`（admin 子树内，管理页可观测性）：管理页「总览」标签页（默认首屏）——轮询 `GET /api/admin/stats` 渲染账号/书目/作品计数、磁盘占用、blob 去重节省、版本+运行时长卡片（契约见 sync-protocol.md §6.7；60s 轮询，读数实时统计不缓存）

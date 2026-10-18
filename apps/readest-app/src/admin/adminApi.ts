@@ -20,6 +20,10 @@ export interface AdminUser {
   disabled: boolean;
   createdAt: string;
   role: string;
+  /** Per-account stored copies at full size (quota semantics), bytes. */
+  bytesUsed: number;
+  /** Last login/sync activity, unix seconds; null = never active. */
+  lastSeenAt: number | null;
 }
 
 export interface CatalogBook {
@@ -31,6 +35,15 @@ export interface CatalogBook {
   sourceHash: string | null;
   addedAt: string;
   addedBy: string;
+  /** Accounts with an active (non-deleted) library row for this hash. */
+  holders: number;
+}
+
+export interface BookHolder {
+  userId: string;
+  email: string | null;
+  deleted: boolean;
+  syncedAt: string | null;
 }
 
 // ── supervisor server monitor (sync-protocol.md §6.6) ─────────────────────
@@ -178,6 +191,12 @@ export const adminApi = {
     }),
 
   listBooks: () => adminFetch<{ books: CatalogBook[] }>('/books').then((r) => r.books),
+
+  /** Who holds this content — the delete-impact view (includes deleted rows). */
+  getBookHolders: (hash: string) =>
+    adminFetch<{ holders: BookHolder[] }>(`/books/${encodeURIComponent(hash)}/holders`).then(
+      (r) => r.holders,
+    ),
 
   deleteBook: (hash: string) =>
     adminFetch<{ deleted: number }>(`/books/${encodeURIComponent(hash)}`, { method: 'DELETE' }),

@@ -159,13 +159,14 @@ Edge TTS 依赖微软免费接口（websocket 协议）；Rust 实现可用等�
 | 端点 | 说明 |
 |---|---|
 | `GET /admin` | 单文件静态管理页（内联 JS，token 存 localStorage；客户端管理页之外的兜底，作品级精细归组仍在此页） |
-| `GET /api/admin/books` | 书目列表（含 workId/sourceHash/addedBy） |
+| `GET /api/admin/books` | 书目列表（含 workId/sourceHash/addedBy，及活跃持有数 `holders`——`books` 表未删除行计数） |
 | `POST /api/admin/books/<hash>` | 编辑 title/author/language；`workId`（null=拆分不归组）；`sourceHash` 衍生链 |
+| `GET /api/admin/books/<hash>/holders` | 持有关系：该 hash 的每条 per-user 在读书目行 `{userId, email, deleted, syncedAt}`（含已删除行、flag 标注；账号已删则 email 为 null；活跃行排前）；删书影响面视图；未知 hash 返回空数组，路径不安全 hash 400 |
 | `DELETE /api/admin/books/<hash>` | 删除书目：目录行 + 全部持有者文件副本 + 封面 + 内容 blob 一并移除；hash 须过路径安全校验；未知 hash 404 |
 | `GET /api/admin/works` / `POST /api/admin/works` | 作品列表（含书目数）/ 手工建作品（id=`manual-<hex4>`） |
 | `POST /api/admin/enrich` | 对未归组书目逐本查 Open Library（title+author→work_id）自动归组；逐本容错，返回 `{enriched, failed[]}` |
 | `POST /api/admin/gc` | 触发孤儿 blob GC，返回 `{removed}` |
-| `GET /api/admin/users` | 用户列表（含 `role`） |
+| `GET /api/admin/users` | 用户列表（含 `role`、存储用量 `bytesUsed`——`files/<uid>/` 副本全尺寸累计，与配额口径一致；最后活跃 `lastSeenAt` unix 秒，登录与已鉴权同步/存储请求盖章，节流 ≤1 次/分钟，从未活跃为 null） |
 | `POST /api/admin/users` | 建用户：`{"email","password"?,"role"?}`——`password` 缺省=随机生成**并在响应里仅此一次**返回，空串=免密；`role` 缺省 `user`；重复邮箱 409 |
 | `DELETE /api/admin/users/<email>` | 删用户：账号 + 其全部同步数据行 + `files/<uid>/` 一并移除；随后清理无持有者的目录行；删自己的账号 400 |
 | `POST /api/admin/users/<email>/password` | 重置密码：`{"password"}`（空串=免密）或缺省=随机生成仅返回一次；未知 404 |
@@ -253,7 +254,7 @@ Edge TTS 依赖微软免费接口（websocket 协议）；Rust 实现可用等�
 | `DEEPL_API_KEY` / `DEEPL_ENDPOINT` | 空 | 空 = mock 回显 |
 | `RUST_LOG` | `info` | tracing |
 
-ywz 的 `AUTH_CODE`/`METADATA_BACKEND`/`METADATA_DSN`/`STORAGE_KIND`/`LOCAL_ROOT`/`S3_*` 不保留；用户与密码管理走 CLI 或 admin API（§6.4）：`sync-server add-user <email> [--password <明文，缺省随机生成并打印；空串 = 免密账号>] [--admin]`、`set-role <email> <admin|user>`、`list-users`、`disable-user <email>`、`passwd <email> [--password <新密码>]`（`--code` 仍被接受为别名）。库表：`users(id TEXT PK, email TEXT UNIQUE, code_sha256 TEXT, code_argon2 TEXT, plan TEXT DEFAULT 'pro', disabled INTEGER DEFAULT 0, role TEXT DEFAULT 'user', created_at TEXT)`（`code_sha256`/`code_argon2` 列名沿用登录码时代，现承载密码；`role` 列对既有库由启动迁移自动补齐）。
+ywz 的 `AUTH_CODE`/`METADATA_BACKEND`/`METADATA_DSN`/`STORAGE_KIND`/`LOCAL_ROOT`/`S3_*` 不保留；用户与密码管理走 CLI 或 admin API（§6.4）：`sync-server add-user <email> [--password <明文，缺省随机生成并打印；空串 = 免密账号>] [--admin]`、`set-role <email> <admin|user>`、`list-users`、`disable-user <email>`、`passwd <email> [--password <新密码>]`（`--code` 仍被接受为别名）。库表：`users(id TEXT PK, email TEXT UNIQUE, code_sha256 TEXT, code_argon2 TEXT, plan TEXT DEFAULT 'pro', disabled INTEGER DEFAULT 0, role TEXT DEFAULT 'user', created_at TEXT, last_seen_at INTEGER NULL)`（`code_sha256`/`code_argon2` 列名沿用登录码时代，现承载密码；`role`/`last_seen_at` 列对既有库由启动迁移自动补齐）。
 
 ## 8. 客户端依赖的隐含前提（回归清单）
 

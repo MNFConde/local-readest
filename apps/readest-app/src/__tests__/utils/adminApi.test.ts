@@ -65,6 +65,17 @@ describe('adminApi', () => {
     expect((fetchMock.mock.calls[1]?.[1] as RequestInit).method).toBe('DELETE');
   });
 
+  it('getBookHolders GETs the holders endpoint with the encoded hash', async () => {
+    const fetchMock = mockFetch(200, {
+      holders: [{ userId: 'u1', email: 'a@x', deleted: false, syncedAt: 's' }],
+    });
+    const { adminApi } = await import('@/admin/adminApi');
+    const holders = await adminApi.getBookHolders('abc/123');
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`${BASE}/api/admin/books/abc%2F123/holders`);
+    expect(holders).toHaveLength(1);
+    expect(holders[0]?.email).toBe('a@x');
+  });
+
   it('maps 401 to a session-expired error and 403 to admin-required', async () => {
     const { adminApi, AdminApiError } = await import('@/admin/adminApi');
     mockFetch(401, { error: 'x' });

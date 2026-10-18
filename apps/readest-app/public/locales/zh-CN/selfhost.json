@@ -85,5 +85,11 @@
   "Dedup savings": "去重节省",
   "stored once instead of per copy": "相同内容只存一份",
   "{{admins}} admin · {{disabled}} disabled": "{{admins}} 管理员 · {{disabled}} 停用",
-  "sync-server v{{version}} · up {{uptime}} · database {{db}}": "sync-server v{{version}} · 已运行 {{uptime}} · 数据库 {{db}}"
+  "sync-server v{{version}} · up {{uptime}} · database {{db}}": "sync-server v{{version}} · 已运行 {{uptime}} · 数据库 {{db}}",
+  "Last active": "最后活跃",
+  "Holders": "持有者",
+  "No accounts hold this book": "暂无账号持有此书",
+  "(deleted account)": "（账号已删除）",
+  "Delete “{{title}}”? Held by {{count}} account(s) — every stored copy is removed.": "删除「{{title}}」？该书被 {{count}} 个账号持有，所有存储副本都将移除。",
+  "Delete “{{title}}” from the shared library? No account currently holds it.": "从共享书库删除「{{title}}」？当前没有账号持有该书。"
 }

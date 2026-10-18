@@ -1603,6 +1603,12 @@ async fn admin_user_crud_password_reset_and_roles() {
         .find(|u| u["email"] == "new@t.test")
         .unwrap();
     assert_eq!(new_user["role"], "admin");
+    // Logins stamp the activity column; a user without logins shows null.
+    assert!(
+        new_user["lastSeenAt"].as_i64().is_some(),
+        "login stamped last_seen_at: {new_user}"
+    );
+    assert_eq!(new_user["bytesUsed"], 0);
 
     // Self-guards: an admin cannot delete their own account or change own role.
     let (status, _, _) = admin_request(
@@ -1749,6 +1755,114 @@ async fn admin_delete_book_removes_catalog_files_and_blob() {
     // Deleting again is a 404.
     let (status, _, _) = admin_request(app, "DELETE", "/api/admin/books/hashDEL1", tok, None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn admin_users_list_usage_activity_and_book_holders() {
+    let mut cfg = test_config("admin-holders");
+    cfg.admin_token = Some("ops-token-456".into());
+    let state = test_state(cfg);
+    let uid_a = seed_user(&state, "a@t.test", "code-a-1");
+    let uid_b = seed_user(&state, "b@t.test", "code-b-1");
+
+    // Shared content with two holders, a book only B has, and a soft-deleted
+    // library row of A's for an hash with no catalog entry.
+    upload_catalog_book(&state, &uid_a, "hashAAA", "Shared Book").await;
+    upload_catalog_book(&state, &uid_b, "hashAAA", "Shared Book").await;
+    upload_catalog_book(&state, &uid_b, "hashB", "Only B").await;
+    {
+        let conn = state.db.lock().unwrap();
+        sync_server::store::upsert_book_raw(
+            &conn,
+            &uid_a,
+            &sync_server::store::BookRow {
+                book_hash: "hashGONE".into(),
+                meta_hash: String::new(),
+                updated_at: None,
+                deleted_at: Some(12345),
+                synced_at: String::new(),
+                data: json!({ "title": "Removed By A", "author": "Someone", "language": "zh" }),
+            },
+        )
+        .unwrap();
+    }
+    let app = routes::router(state.clone());
+    let tok = Some("ops-token-456");
+
+    // Catalog list carries the active-holder count per book.
+    let (status, body, _) = admin_request(app.clone(), "GET", "/api/admin/books", tok, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let holders_by_hash: std::collections::HashMap<&str, i64> = body["books"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| (b["hash"].as_str().unwrap(), b["holders"].as_i64().unwrap()))
+        .collect();
+    assert_eq!(holders_by_hash["hashAAA"], 2);
+    assert_eq!(holders_by_hash["hashB"], 1);
+
+    // Holders endpoint: active rows first, deleted rows flagged, unknown
+    // hash → empty list, traversal-shaped hash → 400.
+    let (status, body, _) = admin_request(
+        app.clone(),
+        "GET",
+        "/api/admin/books/hashAAA/holders",
+        tok,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let holders = body["holders"].as_array().unwrap();
+    assert_eq!(holders.len(), 2, "body: {body}");
+    assert_eq!(holders[0]["email"], "a@t.test");
+    assert_eq!(holders[0]["deleted"], false);
+    assert_eq!(holders[1]["email"], "b@t.test");
+    let (status, body, _) = admin_request(
+        app.clone(),
+        "GET",
+        "/api/admin/books/hashGONE/holders",
+        tok,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let holders = body["holders"].as_array().unwrap();
+    assert_eq!(holders.len(), 1, "body: {body}");
+    assert_eq!(holders[0]["email"], "a@t.test");
+    assert_eq!(holders[0]["deleted"], true);
+    let (status, body, _) = admin_request(
+        app.clone(),
+        "GET",
+        "/api/admin/books/unknownhash/holders",
+        tok,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["holders"], json!([]));
+    let (status, _, _) = admin_request(
+        app.clone(),
+        "GET",
+        "/api/admin/books/..%2Fetc/holders",
+        tok,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Users list: storage sums per-uid copies at full size (three 15-byte
+    // uploads → A 15, B 30 even though the shared blob dedups), and the
+    // authenticated upload requests themselves stamped last_seen_at.
+    let (status, body, _) = admin_request(app, "GET", "/api/admin/users", tok, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = body["users"].as_array().unwrap();
+    let row = |email: &str| rows.iter().find(|u| u["email"] == email).unwrap().clone();
+    let (a, b) = (row("a@t.test"), row("b@t.test"));
+    assert_eq!(a["bytesUsed"], 15, "row: {a}");
+    assert_eq!(b["bytesUsed"], 30, "row: {b}");
+    assert!(a["lastSeenAt"].as_i64().is_some(), "row: {a}");
+    assert!(b["lastSeenAt"].as_i64().is_some(), "row: {b}");
 }
 
 #[cfg(feature = "library")]

@@ -85,5 +85,11 @@
   "Dedup savings": "Dedup savings",
   "stored once instead of per copy": "stored once instead of per copy",
   "{{admins}} admin · {{disabled}} disabled": "{{admins}} admin · {{disabled}} disabled",
-  "sync-server v{{version}} · up {{uptime}} · database {{db}}": "sync-server v{{version}} · up {{uptime}} · database {{db}}"
+  "sync-server v{{version}} · up {{uptime}} · database {{db}}": "sync-server v{{version}} · up {{uptime}} · database {{db}}",
+  "Last active": "Last active",
+  "Holders": "Holders",
+  "No accounts hold this book": "No accounts hold this book",
+  "(deleted account)": "(deleted account)",
+  "Delete “{{title}}”? Held by {{count}} account(s) — every stored copy is removed.": "Delete “{{title}}”? Held by {{count}} account(s) — every stored copy is removed.",
+  "Delete “{{title}}” from the shared library? No account currently holds it.": "Delete “{{title}}” from the shared library? No account currently holds it."
 }

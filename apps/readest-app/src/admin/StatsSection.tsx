@@ -8,22 +8,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from '@/hooks/useTranslation';
 import { adminApi, AdminApiError, ServerStats } from './adminApi';
+import { humanBytes } from './format';
 
 // Stats move slowly; a one-minute refresh is plenty (the live monitor tab
 // polls at 5s — that would be waste here).
 const POLL_INTERVAL_MS = 60_000;
-
-function humanBytes(bytes?: number | null): string {
-  if (!bytes || bytes <= 0) return '—';
-  const units = ['B', 'K', 'M', 'G', 'T'];
-  let v = bytes;
-  let u = 0;
-  while (v >= 1024 && u < units.length - 1) {
-    v /= 1024;
-    u += 1;
-  }
-  return u === 0 ? `${bytes}B` : `${v.toFixed(1)}${units[u]}`;
-}
 
 function humanDuration(secs?: number | null): string {
   if (secs == null || secs < 0) return '—';
