@@ -38,6 +38,11 @@ cd apps/readest-app && pnpm install && pnpm lint && pnpm test   # 冒烟闸
 
 ```bash
 git config rerere.enabled true        # 冲突解法记忆(仓库本地配置,不随 clone 走)
+# 两个 vendored 子模块(tauri-plugin-turso / packages/tauri,上游以无 URL 的 gitlink 签入)
+# 里的 schema/permissions 是构建时会重新生成的自动产物——本地构建后 status 常显脏,
+# .gitignore 对已跟踪文件无效,故用本机配置忽略其脏状态(只挡显示,不碰内容):
+git config submodule.apps/readest-app/src-tauri/plugins/tauri-plugin-turso.ignore dirty
+git config submodule.packages/tauri.ignore dirty
 pnpm install                          # 根 workspace
 ```
 
