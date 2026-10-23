@@ -1,4 +1,13 @@
 import { getAccessToken } from './access';
+// SELFHOSTED (fork): authenticated API calls route through the silent 401
+// re-login wrapper (libs/selfhost/authFetch) so an expired JWT renews itself.
+import { selfhostedAuthFetch } from '@/libs/selfhost/authFetch';
+import { SELFHOSTED } from '@/utils/supabase';
+
+// Resolves `fetch` at CALL time (not module-eval time) so test suites that
+// stub globalThis.fetch keep intercepting the non-selfhosted path too.
+const apiFetch: typeof fetch = (input, init) =>
+  SELFHOSTED ? selfhostedAuthFetch(input, init) : fetch(input, init);
 
 export const fetchWithTimeout = (url: string, options: RequestInit = {}, timeout = 10000) => {
   const controller = new AbortController();
@@ -20,7 +29,7 @@ export const fetchWithAuth = async (url: string, options: RequestInit) => {
     Authorization: `Bearer ${token}`,
   };
 
-  const response = await fetch(url, { ...options, headers });
+  const response = await apiFetch(url, { ...options, headers });
 
   if (!response.ok) {
     const errorData = await response.json();

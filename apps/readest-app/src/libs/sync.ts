@@ -1,7 +1,14 @@
 import { Book, BookConfig, BookNote, BookDataRecord } from '@/types/book';
+// SELFHOSTED (fork): sync requests route through the silent 401 re-login
+// wrapper (libs/selfhost/authFetch) so a mid-session expired JWT renews
+// itself and replays instead of failing every sync until the next launch.
+import { selfhostedFetchWithTimeout } from '@/libs/selfhost/authFetch';
 import { getAPIBaseUrl } from '@/services/environment';
 import { getAccessToken } from '@/utils/access';
 import { fetchWithTimeout } from '@/utils/fetch';
+import { SELFHOSTED } from '@/utils/supabase';
+
+const apiFetchWithTimeout = SELFHOSTED ? selfhostedFetchWithTimeout : fetchWithTimeout;
 
 // Resolved at call time: in self-hosted mode the server URL is entered at
 // login and persisted in localStorage, which happens AFTER this module is
@@ -73,7 +80,7 @@ export class SyncClient {
 
     const limitParam = limit && limit > 0 ? `&limit=${encodeURIComponent(limit)}` : '';
     const url = `${syncAPIEndpoint()}?since=${encodeURIComponent(since)}&type=${type ?? ''}&book=${book ?? ''}&meta_hash=${metaHash ?? ''}${limitParam}`;
-    const res = await fetchWithTimeout(
+    const res = await apiFetchWithTimeout(
       url,
       {
         headers: {
@@ -99,7 +106,7 @@ export class SyncClient {
     const token = await getAccessToken();
     if (!token) throw new Error('Not authenticated');
 
-    const res = await fetchWithTimeout(
+    const res = await apiFetchWithTimeout(
       syncAPIEndpoint(),
       {
         method: 'POST',

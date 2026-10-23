@@ -8,6 +8,7 @@
 
 import { getAccessToken } from '@/utils/access';
 import { getBaseUrl } from '@/services/environment';
+import { triggerSelfhostedRelogin } from '@/libs/selfhost/authFetch';
 import {
   tauriUpload as rawTauriUpload,
   tauriDownload as rawTauriDownload,
@@ -15,6 +16,16 @@ import {
   webDownload as rawWebDownload,
   type ProgressHandler,
 } from '@/utils/transfer';
+
+// The native/XHR transports cannot replay a transfer mid-flight; on an auth
+// rejection just renew the session so the transfer's next attempt runs with
+// a fresh token. Web upload/download surface a 401/403 as
+// UploadFileError.Unauthorized ("Unauthorized access") or "…status 401".
+const healAuthOnTransferFailure = (e: unknown): never => {
+  const message = e instanceof Error ? e.message : String(e);
+  if (/unauthorized|status 40[13]/i.test(message)) void triggerSelfhostedRelogin();
+  throw e;
+};
 
 const toFullUrl = (url: string) => {
   if (/^https?:\/\//i.test(url)) return url;
@@ -36,9 +47,9 @@ export const webUpload = (
 ): Promise<void> => {
   // The header must be computed per call (token freshness), so wrap in a
   // promise chain instead of an async signature change.
-  return buildBlobAuthHeaders(uploadUrl).then((headers) =>
-    rawWebUpload(file, toFullUrl(uploadUrl), onProgress, headers),
-  );
+  return buildBlobAuthHeaders(uploadUrl)
+    .then((headers) => rawWebUpload(file, toFullUrl(uploadUrl), onProgress, headers))
+    .catch(healAuthOnTransferFailure);
 };
 
 export const tauriUpload = (
@@ -47,9 +58,9 @@ export const tauriUpload = (
   method: Parameters<typeof rawTauriUpload>[2],
   onProgress?: ProgressHandler,
 ): Promise<string> => {
-  return buildBlobAuthHeaders(url).then((headers) =>
-    rawTauriUpload(toFullUrl(url), filePath, method, onProgress, headers),
-  );
+  return buildBlobAuthHeaders(url)
+    .then((headers) => rawTauriUpload(toFullUrl(url), filePath, method, onProgress, headers))
+    .catch(healAuthOnTransferFailure);
 };
 
 export const webDownload = (
@@ -57,12 +68,14 @@ export const webDownload = (
   onProgress?: ProgressHandler,
   headers?: Record<string, string>,
 ) => {
-  return buildBlobAuthHeaders(downloadUrl).then((blobHeaders) =>
-    rawWebDownload(toFullUrl(downloadUrl), onProgress, {
-      ...blobHeaders,
-      ...headers,
-    }),
-  );
+  return buildBlobAuthHeaders(downloadUrl)
+    .then((blobHeaders) =>
+      rawWebDownload(toFullUrl(downloadUrl), onProgress, {
+        ...blobHeaders,
+        ...headers,
+      }),
+    )
+    .catch(healAuthOnTransferFailure);
 };
 
 export const tauriDownload = (
@@ -74,15 +87,17 @@ export const tauriDownload = (
   singleThreaded?: boolean,
   skipSslVerification?: boolean,
 ): Promise<Record<string, string>> => {
-  return buildBlobAuthHeaders(url).then((blobHeaders) =>
-    rawTauriDownload(
-      toFullUrl(url),
-      filePath,
-      onProgress,
-      { ...blobHeaders, ...headers },
-      body,
-      singleThreaded,
-      skipSslVerification,
-    ),
-  );
+  return buildBlobAuthHeaders(url)
+    .then((blobHeaders) =>
+      rawTauriDownload(
+        toFullUrl(url),
+        filePath,
+        onProgress,
+        { ...blobHeaders, ...headers },
+        body,
+        singleThreaded,
+        skipSslVerification,
+      ),
+    )
+    .catch(healAuthOnTransferFailure);
 };

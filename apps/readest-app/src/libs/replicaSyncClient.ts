@@ -1,8 +1,19 @@
 import { getAccessToken } from '@/utils/access';
 import { getAPIBaseUrl } from '@/services/environment';
+// SELFHOSTED (fork): replica requests route through the silent 401 re-login
+// wrapper (libs/selfhost/authFetch) — the batched pull fires on every window
+// focus / online event, so it is usually the FIRST request to hit an expired
+// token after the network comes back.
+import { selfhostedAuthFetch } from '@/libs/selfhost/authFetch';
 import { SyncError } from '@/libs/errors';
+import { SELFHOSTED } from '@/utils/supabase';
 import type { Hlc, ReplicaRow } from '@/types/replica';
 import type { SyncErrorCode } from '@/libs/errors';
+
+// Resolves `fetch` at CALL time (not module-eval time) so test suites that
+// stub globalThis.fetch keep intercepting the non-selfhosted path too.
+const apiFetch: typeof fetch = (input, init) =>
+  SELFHOSTED ? selfhostedAuthFetch(input, init) : fetch(input, init);
 
 const ENDPOINT = () => `${getAPIBaseUrl()}/sync/replicas`;
 const KEYS_ENDPOINT = () => `${getAPIBaseUrl()}/sync/replica-keys`;
@@ -50,7 +61,7 @@ export class ReplicaSyncClient {
     const token = await requireToken();
     let response: Response;
     try {
-      response = await fetch(ENDPOINT(), {
+      response = await apiFetch(ENDPOINT(), {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -79,7 +90,7 @@ export class ReplicaSyncClient {
     const url = `${ENDPOINT()}?${params.toString()}`;
     let response: Response;
     try {
-      response = await fetch(url, {
+      response = await apiFetch(url, {
         method: 'GET',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -116,7 +127,7 @@ export class ReplicaSyncClient {
     const token = await requireToken();
     let response: Response;
     try {
-      response = await fetch(ENDPOINT(), {
+      response = await apiFetch(ENDPOINT(), {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -168,7 +179,7 @@ export class ReplicaSyncClient {
     const token = await requireToken();
     let response: Response;
     try {
-      response = await fetch(KEYS_ENDPOINT(), {
+      response = await apiFetch(KEYS_ENDPOINT(), {
         method: 'GET',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -215,7 +226,7 @@ export class ReplicaSyncClient {
     const token = await requireToken();
     let response: Response;
     try {
-      response = await fetch(KEYS_ENDPOINT(), {
+      response = await apiFetch(KEYS_ENDPOINT(), {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -240,7 +251,7 @@ export class ReplicaSyncClient {
     const token = await requireToken();
     let response: Response;
     try {
-      response = await fetch(KEYS_ENDPOINT(), {
+      response = await apiFetch(KEYS_ENDPOINT(), {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
