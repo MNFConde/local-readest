@@ -21,6 +21,7 @@ cd apps/readest-app && pnpm install && pnpm lint && pnpm test   # 冒烟闸
 ```
 
 - 冲突预期集中在共享文件的 SELFHOSTED 接缝行与 `package.json`/CI 等小文件;`apps/readest-app/AGENTS.md` 冲突的解法恒为**保留顶部 FORK 指针**。
+- 根 `README.md` 是 fork 门面,冲突解法恒为**整体保留本分支版本**(`git checkout --ours README.md && git add`)——永不取上游,官方说明指路上游仓库;这是继 app `AGENTS.md` 之后第二个有意保留的永久分叉,名单到此为止。
 - 合并前后各跑一次 `pnpm check:decoupling`,确认预算没有被合并意外撑爆。
 
 ## 发布与版本号
