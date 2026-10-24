@@ -44,6 +44,9 @@ pub fn router(state: SharedState) -> Router<SharedState> {
             "/host-snapshot",
             get(get_host_snapshot).post(post_host_snapshot),
         )
+        // Admin-page service buttons (⑩): operator intent queued here, relayed
+        // to the supervisor in the next snapshot push's response body.
+        .route("/service-command", post(post_service_command))
         // Aggregate overview numbers for the admin console's Overview tab.
         .route("/stats", get(get_stats))
         // Full-server rebuild archive for the Maintenance tab.
@@ -772,6 +775,26 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Commands older than this are dropped instead of delivered: a supervisor
+/// that was down (or restarted) must never replay minutes-old intent.
+const SERVICE_COMMAND_TTL_SECS: u64 = 60;
+
+/// Purge expired entries, then drain everything as response JSON. Called
+/// from the snapshot push response — read-then-clear, so each command is
+/// delivered at most once.
+fn drain_service_commands(state: &SharedState) -> Vec<Value> {
+    let mut queue = state
+        .service_commands
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let now = unix_now();
+    queue.retain(|c| now.saturating_sub(c.queued_at_unix) <= SERVICE_COMMAND_TTL_SECS);
+    queue
+        .drain(..)
+        .map(|c| json!({ "service": c.service, "command": c.command }))
+        .collect()
+}
+
 async fn post_host_snapshot(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -783,13 +806,55 @@ async fn post_host_snapshot(
     if !snapshot.is_object() {
         return Err(StatusCode::BAD_REQUEST.into_response());
     }
-    let mut slot = state
-        .host_snapshot
+    {
+        let mut slot = state
+            .host_snapshot
+            .lock()
+            .map_err(|_| super::admin_error("snapshot lock poisoned"))?;
+        *slot = Some(crate::db::HostSnapshotEntry {
+            received_at_unix: unix_now(),
+            body: snapshot,
+        });
+    }
+    // ⑩: the push response carries queued admin-page commands back — the one
+    // transport the supervisor already owns; pre-⑩ supervisors simply ignore
+    // the body (and pre-⑩ servers answered 204, which new supervisors parse
+    // as "no commands"). Always 200 with a JSON body now.
+    let commands = drain_service_commands(&state);
+    Ok(Json(json!({ "commands": commands })).into_response())
+}
+
+/// Queue one operator intent from the admin page's service buttons (⑩ P2).
+/// The server stores and forwards only — the supervisor decides and executes.
+async fn post_service_command(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Response, Response> {
+    require_admin(&state, &headers).await?;
+    let payload: Value =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
+    let service = payload
+        .get("service")
+        .and_then(Value::as_str)
+        .filter(|s| matches!(*s, "sync-server" | "web"));
+    let command = payload
+        .get("command")
+        .and_then(Value::as_str)
+        .filter(|c| matches!(*c, "start" | "stop" | "restart"));
+    let (Some(service), Some(command)) = (service, command) else {
+        return Err(StatusCode::BAD_REQUEST.into_response());
+    };
+    let mut queue = state
+        .service_commands
         .lock()
-        .map_err(|_| super::admin_error("snapshot lock poisoned"))?;
-    *slot = Some(crate::db::HostSnapshotEntry {
-        received_at_unix: unix_now(),
-        body: snapshot,
+        .map_err(|_| super::admin_error("command queue lock poisoned"))?;
+    let now = unix_now();
+    queue.retain(|c| now.saturating_sub(c.queued_at_unix) <= SERVICE_COMMAND_TTL_SECS);
+    queue.push_back(crate::db::PendingServiceCommand {
+        service: service.to_string(),
+        command: command.to_string(),
+        queued_at_unix: now,
     });
     Ok(StatusCode::NO_CONTENT.into_response())
 }

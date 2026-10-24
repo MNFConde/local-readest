@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use rusqlite::Connection;
@@ -16,6 +17,17 @@ pub struct HostSnapshotEntry {
     pub body: serde_json::Value,
 }
 
+/// One operator intent from the admin page's service buttons (⑩): stored
+/// here, drained by the supervisor out of the host-snapshot push response.
+/// In-memory, TTL-bounded and delivered at most once — the server only ever
+/// stores and forwards; it never invents commands and never acts on them
+/// itself (anti-loop rule #1).
+pub struct PendingServiceCommand {
+    pub service: String,
+    pub command: String,
+    pub queued_at_unix: u64,
+}
+
 pub struct AppState {
     pub db: Mutex<Connection>,
     pub cfg: Config,
@@ -25,6 +37,8 @@ pub struct AppState {
     /// Newest supervisor metrics snapshot, if the supervisor ever delivered
     /// one (None = "not connected" for the admin page's server monitor).
     pub host_snapshot: Mutex<Option<HostSnapshotEntry>>,
+    /// Queued admin-page service commands awaiting the next supervisor push.
+    pub service_commands: Mutex<VecDeque<PendingServiceCommand>>,
     /// Process start, for the admin stats endpoint's uptime figure.
     pub started_at: std::time::Instant,
     /// True while a backup tar is streaming; a second concurrent backup is

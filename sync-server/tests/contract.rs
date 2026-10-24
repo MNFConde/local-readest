@@ -37,6 +37,7 @@ pub fn test_state(cfg: Config) -> SharedState {
         cfg,
         login_limiter: Mutex::new(sync_server::ratelimit::LoginLimiter::new()),
         host_snapshot: Mutex::new(None),
+        service_commands: Mutex::new(std::collections::VecDeque::new()),
         started_at: std::time::Instant::now(),
         backup_busy: std::sync::atomic::AtomicBool::new(false),
     })
@@ -2096,8 +2097,8 @@ async fn admin_host_snapshot_store_query_and_auth() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    // Supervisor push: 204 no content; the newest snapshot is served back
-    // verbatim with a freshness stamp.
+    // Supervisor push: 200 with the command mailbox (empty here — ⑩); the
+    // newest snapshot is served back verbatim with a freshness stamp.
     let snapshot = json!({
         "schema": 1,
         "ts": 1760000000,
@@ -2105,7 +2106,7 @@ async fn admin_host_snapshot_store_query_and_auth() {
         "host": { "os": "windows", "cores": 8, "total_memory_bytes": 17_000_000_000u64 },
         "services": [ { "name": "sync-server", "state": "running" } ]
     });
-    let (status, _, _) = admin_request(
+    let (status, body, _) = admin_request(
         app.clone(),
         "POST",
         "/api/admin/host-snapshot",
@@ -2113,7 +2114,8 @@ async fn admin_host_snapshot_store_query_and_auth() {
         Some(snapshot.clone()),
     )
     .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["commands"], json!([]));
 
     let (status, body, _) = admin_request(
         app,
@@ -2128,6 +2130,105 @@ async fn admin_host_snapshot_store_query_and_auth() {
     assert_eq!(body["snapshot"], snapshot);
     assert!(body["received_at"].as_u64().unwrap() > 0);
     assert!(body["age_secs"].as_u64().unwrap() < 60);
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn admin_service_command_mailbox_delivers_via_push_response() {
+    let mut cfg = test_config("svc-cmd");
+    cfg.admin_token = Some("op-token-123".into());
+    let state = test_state(cfg);
+    let app = routes::router(state.clone());
+
+    // No credential → 401; unknown service/command → 400; valid → 204.
+    let (status, _, _) = admin_request(
+        app.clone(),
+        "POST",
+        "/api/admin/service-command",
+        None,
+        Some(json!({"service": "web", "command": "stop"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    for bad in [
+        json!({"service": "nope", "command": "stop"}),
+        json!({"service": "web", "command": "explode"}),
+        json!({}),
+    ] {
+        let (status, _, _) = admin_request(
+            app.clone(),
+            "POST",
+            "/api/admin/service-command",
+            Some("op-token-123"),
+            Some(bad),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    for cmd in [
+        json!({"service": "web", "command": "stop"}),
+        json!({"service": "sync-server", "command": "restart"}),
+    ] {
+        let (status, _, _) = admin_request(
+            app.clone(),
+            "POST",
+            "/api/admin/service-command",
+            Some("op-token-123"),
+            Some(cmd),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    // The next snapshot push carries both commands back, in order…
+    let (status, body, _) = admin_request(
+        app.clone(),
+        "POST",
+        "/api/admin/host-snapshot",
+        Some("op-token-123"),
+        Some(json!({ "schema": 1, "services": [] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["commands"],
+        json!([
+            { "service": "web", "command": "stop" },
+            { "service": "sync-server", "command": "restart" },
+        ])
+    );
+    // …and the mailbox is then empty (read-then-clear, at-most-once).
+    let (status, body, _) = admin_request(
+        app.clone(),
+        "POST",
+        "/api/admin/host-snapshot",
+        Some("op-token-123"),
+        Some(json!({ "schema": 1, "services": [] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["commands"], json!([]));
+
+    // A queued command older than the TTL is dropped, never replayed to a
+    // supervisor that was down when it was queued.
+    {
+        let mut queue = state.service_commands.lock().unwrap();
+        queue.push_back(db::PendingServiceCommand {
+            service: "web".into(),
+            command: "start".into(),
+            queued_at_unix: 0, // unix epoch: far past the 60s TTL
+        });
+    }
+    let (status, body, _) = admin_request(
+        app,
+        "POST",
+        "/api/admin/host-snapshot",
+        Some("op-token-123"),
+        Some(json!({ "schema": 1, "services": [] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["commands"], json!([]));
 }
 
 #[cfg(feature = "library")]
