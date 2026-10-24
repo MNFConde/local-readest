@@ -8,6 +8,13 @@
 // in the bundle deployments (and pushing needs ADMIN_TOKEN), so "not
 // connected" simply means no supervisor feed — everything else on this page
 // keeps working.
+//
+// Since ⑩ each service row also carries start/stop/restart buttons. They
+// queue operator intent on the server (POST /api/admin/service-command); the
+// supervisor picks it up on its next push (≤5s) — this panel never talks to
+// the supervisor directly. Design limit, on purpose: stopping sync-server
+// kills this panel's own mailbox, so the UI cannot offer a "stop everything"
+// — full stops stay at the OS level (stop.bat / tray quit / uninstall).
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from '@/hooks/useTranslation';
@@ -41,11 +48,22 @@ function stateBadgeClass(state: string): string {
   if (state === 'running') return 'badge-success';
   if (state === 'restarting') return 'badge-warning';
   if (state === 'circuit open') return 'badge-error';
+  if (state === 'halted') return 'badge-ghost';
   if (state === 'stopped') return 'badge-ghost';
   return 'badge-info';
 }
 
-function ServiceRow({ service }: { service: HostServiceStatus }) {
+type ServiceCommand = 'start' | 'stop' | 'restart';
+
+function ServiceRow({
+  service,
+  pending,
+  onCommand,
+}: {
+  service: HostServiceStatus;
+  pending: string | null;
+  onCommand: (service: string, command: ServiceCommand) => void;
+}) {
   const _ = useTranslation('selfhost');
   const probe = service.probe;
   const probeText = !probe
@@ -55,6 +73,13 @@ function ServiceRow({ service }: { service: HostServiceStatus }) {
       : probe.status === 0
         ? _('no answer')
         : `HTTP ${probe.status}`;
+  const busy = pending === service.name;
+  const stopWarning =
+    service.name === 'sync-server'
+      ? _(
+          'Stopping sync-server kills this panel’s own recovery channel — restart it from the supervisor TUI/tray or by restarting the supervisor. Stop anyway?',
+        )
+      : null;
   return (
     <tr>
       <td className='font-mono'>{service.name}</td>
@@ -72,6 +97,37 @@ function ServiceRow({ service }: { service: HostServiceStatus }) {
       <td>{humanBytes(service.memory_bytes)}</td>
       <td>{(service.cpu_percent ?? 0).toFixed(1)}%</td>
       <td>{probeText}</td>
+      <td>
+        <div className='flex gap-1'>
+          <button
+            className='btn btn-xs btn-outline'
+            disabled={busy}
+            title={_('Start (clears failures/circuit, starts now)')}
+            onClick={() => onCommand(service.name, 'start')}
+          >
+            {_('Start')}
+          </button>
+          <button
+            className='btn btn-xs btn-outline'
+            disabled={busy}
+            title={_('Stop (stays down until started again)')}
+            onClick={() => {
+              if (stopWarning && !window.confirm(stopWarning)) return;
+              onCommand(service.name, 'stop');
+            }}
+          >
+            {_('Stop')}
+          </button>
+          <button
+            className='btn btn-xs btn-outline'
+            disabled={busy}
+            title={_('Restart (stop + start, not counted as a failure)')}
+            onClick={() => onCommand(service.name, 'restart')}
+          >
+            {_('Restart')}
+          </button>
+        </div>
+      </td>
     </tr>
   );
 }
@@ -82,6 +138,11 @@ export default function HostMonitorSection() {
   const [ageSecs, setAgeSecs] = useState<number | null>(null);
   const [state, setState] = useState<'loading' | 'connected' | 'disconnected' | 'error'>('loading');
   const [error, setError] = useState('');
+  const [pending, setPending] = useState<string | null>(null);
+  const [commandNotice, setCommandNotice] = useState<{
+    kind: 'ok' | 'error';
+    text: string;
+  } | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const poll = useCallback(async () => {
@@ -109,6 +170,25 @@ export default function HostMonitorSection() {
     };
   }, [poll]);
 
+  const onCommand = useCallback(async (service: string, command: ServiceCommand) => {
+    setPending(service);
+    setCommandNotice(null);
+    try {
+      await adminApi.sendServiceCommand(service, command);
+      setCommandNotice({
+        kind: 'ok',
+        text: _('Command queued — the supervisor runs it within ~5s.'),
+      });
+    } catch (e) {
+      setCommandNotice({
+        kind: 'error',
+        text: e instanceof AdminApiError ? e.message : String(e),
+      });
+    } finally {
+      setPending(null);
+    }
+  }, []);
+
   const supervisor = snapshot?.supervisor;
   const host = snapshot?.host;
   const services = snapshot?.services ?? [];
@@ -121,6 +201,12 @@ export default function HostMonitorSection() {
         {state === 'error' && (
           <div className='alert alert-error py-2 text-sm'>
             <span>{error}</span>
+          </div>
+        )}
+
+        {commandNotice && (
+          <div className={`alert py-2 text-sm ${commandNotice.kind === 'ok' ? '' : 'alert-error'}`}>
+            <span>{commandNotice.text}</span>
           </div>
         )}
 
@@ -163,18 +249,19 @@ export default function HostMonitorSection() {
                     <th>{_('Memory')}</th>
                     <th>CPU</th>
                     <th>{_('Latency')}</th>
+                    <th>{_('Actions')}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {services.map((s) => (
-                    <ServiceRow key={s.name} service={s} />
+                    <ServiceRow key={s.name} service={s} pending={pending} onCommand={onCommand} />
                   ))}
                 </tbody>
               </table>
             </div>
             <p className='text-xs opacity-60'>
               {_(
-                'Restart policy: exponential backoff (1s/4s/16s), circuit breaker after 5 rapid failures. Metrics arrive every 5s.',
+                'Commands queue on the server; the supervisor runs them on its next metrics push (~5s). Full stops stay at the OS level. Restart policy: exponential backoff (1s/4s/16s), circuit breaker after 5 rapid failures (an operator Start recovers it).',
               )}
             </p>
           </>

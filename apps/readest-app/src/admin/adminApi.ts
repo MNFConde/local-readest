@@ -53,6 +53,8 @@ export interface BookHolder {
 export interface HostServiceStatus {
   name: string;
   state: string;
+  /** Operator intent from ⑩: 'run' = supervised, 'halt' = manually stopped. */
+  desired?: 'run' | 'halt';
   pid?: number | null;
   uptime_secs?: number | null;
   restarts?: number;
@@ -216,6 +218,18 @@ export const adminApi = {
 
   /** Newest supervisor metrics snapshot; available=false when not connected. */
   getHostSnapshot: () => adminFetch<HostSnapshotQuery>('/host-snapshot'),
+
+  /**
+   * Queue a per-service start/stop/restart for the supervisor to execute
+   * (⑩): stored server-side, relayed on the supervisor's next metrics push.
+   * Returns before the command runs — the monitor's next poll shows the new
+   * state.
+   */
+  sendServiceCommand: (service: string, command: 'start' | 'stop' | 'restart') =>
+    adminFetch<void>('/service-command', {
+      method: 'POST',
+      body: JSON.stringify({ service, command }),
+    }),
 
   /** Aggregated overview numbers (counts, disk sizes, version, uptime). */
   getStats: () => adminFetch<ServerStats>('/stats'),

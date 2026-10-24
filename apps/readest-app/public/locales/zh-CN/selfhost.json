@@ -66,7 +66,6 @@
   "no answer": "无响应",
   "headless": "无界面模式",
   "dashboard": "面板模式",
-  "Restart policy: exponential backoff (1s/4s/16s), circuit breaker after 5 rapid failures. Metrics arrive every 5s.": "重启策略:指数退避(1s/4s/16s),连续 5 次快速失败后熔断。指标每 5 秒推送一次。",
   "Your guest shelf has {{count}} book(s) not in this account.": "访客书架有 {{count}} 本此账号中没有的书。",
   "Import from Guest Shelf": "从访客书架导入",
   "Importing shelves the book for this account; files are shared on the device and are not copied.": "导入只是把书加入本账号书架;文件在设备上按内容共享,不会复制。",
@@ -96,5 +95,15 @@
   "Downloads one tar with the database, book files, and the login signing key — unpack it into a fresh data directory to rebuild the server.": "下载包含数据库、书目文件与登录签名密钥的 tar 包——解包到全新数据目录即可重建服务端。",
   "Download backup": "下载备份",
   "Preparing backup…": "正在准备备份…",
-  "Backup downloaded": "备份已下载"
+  "Backup downloaded": "备份已下载",
+  "Start": "启动",
+  "Stop": "停止",
+  "Restart": "重启",
+  "Actions": "操作",
+  "Start (clears failures/circuit, starts now)": "启动(清零失败计数/熔断,立即拉起)",
+  "Stop (stays down until started again)": "停止(保持停止,直到再次启动)",
+  "Restart (stop + start, not counted as a failure)": "重启(停+启,不计为失败)",
+  "Stopping sync-server kills this panel’s own recovery channel — restart it from the supervisor TUI/tray or by restarting the supervisor. Stop anyway?": "停止 sync-server 会切断本面板自己的恢复通道——需在 supervisor 的 TUI/托盘或重启 supervisor 恢复。仍要停止吗?",
+  "Command queued — the supervisor runs it within ~5s.": "命令已入队——supervisor 将在约 5 秒内执行。",
+  "Commands queue on the server; the supervisor runs them on its next metrics push (~5s). Full stops stay at the OS level. Restart policy: exponential backoff (1s/4s/16s), circuit breaker after 5 rapid failures (an operator Start recovers it).": "命令在服务端排队,supervisor 在下次指标推送时执行(约 5 秒)。完全停止始终在操作系统层操作。重启策略:指数退避(1s/4s/16s),连续 5 次快速失败熔断(按「启动」即可恢复)。"
 }

@@ -66,7 +66,6 @@
   "no answer": "no answer",
   "headless": "headless",
   "dashboard": "dashboard",
-  "Restart policy: exponential backoff (1s/4s/16s), circuit breaker after 5 rapid failures. Metrics arrive every 5s.": "Restart policy: exponential backoff (1s/4s/16s), circuit breaker after 5 rapid failures. Metrics arrive every 5s.",
   "Your guest shelf has {{count}} book(s) not in this account.": "Your guest shelf has {{count}} book(s) not in this account.",
   "Import from Guest Shelf": "Import from Guest Shelf",
   "Importing shelves the book for this account; files are shared on the device and are not copied.": "Importing shelves the book for this account; files are shared on the device and are not copied.",
@@ -96,5 +95,15 @@
   "Downloads one tar with the database, book files, and the login signing key — unpack it into a fresh data directory to rebuild the server.": "Downloads one tar with the database, book files, and the login signing key — unpack it into a fresh data directory to rebuild the server.",
   "Download backup": "Download backup",
   "Preparing backup…": "Preparing backup…",
-  "Backup downloaded": "Backup downloaded"
+  "Backup downloaded": "Backup downloaded",
+  "Start": "Start",
+  "Stop": "Stop",
+  "Restart": "Restart",
+  "Actions": "Actions",
+  "Start (clears failures/circuit, starts now)": "Start (clears failures/circuit, starts now)",
+  "Stop (stays down until started again)": "Stop (stays down until started again)",
+  "Restart (stop + start, not counted as a failure)": "Restart (stop + start, not counted as a failure)",
+  "Stopping sync-server kills this panel’s own recovery channel — restart it from the supervisor TUI/tray or by restarting the supervisor. Stop anyway?": "Stopping sync-server kills this panel’s own recovery channel — restart it from the supervisor TUI/tray or by restarting the supervisor. Stop anyway?",
+  "Command queued — the supervisor runs it within ~5s.": "Command queued — the supervisor runs it within ~5s.",
+  "Commands queue on the server; the supervisor runs them on its next metrics push (~5s). Full stops stay at the OS level. Restart policy: exponential backoff (1s/4s/16s), circuit breaker after 5 rapid failures (an operator Start recovers it).": "Commands queue on the server; the supervisor runs them on its next metrics push (~5s). Full stops stay at the OS level. Restart policy: exponential backoff (1s/4s/16s), circuit breaker after 5 rapid failures (an operator Start recovers it)."
 }
