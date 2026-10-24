@@ -178,16 +178,17 @@ Edge TTS 依赖微软免费接口（websocket 协议）；Rust 实现可用等�
 
 `GET /api/metadata/search` 的 OL 映射额外保留 `workKey`/`editionKeys`/`language`（§5 表中形状不变，仅新增字段），供自动归组复用同一查询。
 
-### 6.6 管理层指标快照 /api/admin/host-snapshot（待办⑦）
+### 6.6 管理层指标快照 /api/admin/host-snapshot + 服务命令邮箱（待办⑦；⑩ 增补手动控制）
 
-发布包里的 `readest-supervisor`（独立进程管理者，拉起并守护 sync-server + web 双服务）每 5 秒向本端点推送一份宿主/子进程指标快照（`Authorization: Bearer <ADMIN_TOKEN>`；**未设 ADMIN_TOKEN 即不推送**）。服务端原样存内存最新一份（不落库、重启即空），管理页「服务监控」标签页轮询读取。
+发布包里的 `readest-supervisor`（独立进程管理者，拉起并守护 sync-server + web 双服务）每 5 秒向本端点推送一份宿主/子进程指标快照（`Authorization: Bearer <ADMIN_TOKEN>`；**未设 ADMIN_TOKEN 即不推送**）。服务端原样存内存最新一份（不落库、重启即空），管理页「服务监控」标签页轮询读取。自 ⑩ 起，推送的**响应体**捎回管理页排队的 `service-command`（运维者意图，服务端只存转运、永不自生成命令）。
 
 | 端点 | 说明 |
 |---|---|
-| `POST /api/admin/host-snapshot` | 提交快照（JSON 对象；非对象 400）。成功 **204** 无响应体 |
+| `POST /api/admin/host-snapshot` | 提交快照（JSON 对象；非对象 400）。成功 **200**，响应体 `{"commands":[{"service":"web","command":"stop"},…]}`——待执行命令**读后清**（每条至多送达一次），无命令时为空数组。（⑩ 前的服务端返回 204 无体；⑩ 前的 supervisor 忽略响应体——双向向后兼容） |
 | `GET /api/admin/host-snapshot` | `{"available":false}`（从未收到过）或 `{"available":true,"received_at":<unix秒>,"age_secs":<n>,"snapshot":{…原样}}` |
+| `POST /api/admin/service-command` | 管理页按钮入队一条运维命令，body `{"service":"sync-server"\|"web","command":"start"\|"stop"\|"restart"}`；鉴权双轨同 §6.4；非法 service/command 400，成功 **204**。内存 `VecDeque`、TTL 60 秒（supervisor 重启后不重放陈旧意图）、由下一次快照推送读后清地带走 |
 
-快照 JSON 契约（v1，字段对读取方全部可选、只增不改）：
+快照 JSON 契约（v1，字段对读取方全部可选、只增不改；⑩ 新增 `desired` 字段与 `halted` 状态）：
 
 ```json
 {
@@ -199,6 +200,7 @@ Edge TTS 依赖微软免费接口（websocket 协议）；Rust 实现可用等�
     {
       "name": "sync-server",
       "state": "running",
+      "desired": "run",
       "pid": 1234, "uptime_secs": 600, "restarts": 0, "consecutive_failures": 0,
       "last_exit": { "code": 1, "uptime_secs": 2 },
       "probe": { "ok": true, "status": 200, "rtt_ms": 3 },
@@ -209,9 +211,9 @@ Edge TTS 依赖微软免费接口（websocket 协议）；Rust 实现可用等�
 }
 ```
 
-`state` 取值：`starting|running|restarting|circuit open|stopped`；`probe` 为 supervisor 对各服务**直连**（sync 打 `/api/health`、web 打 `/`）的探活结果。
+`state` 取值：`starting|running|restarting|circuit open|halted|stopped`——`halted`=运维手动 Stop 压制（不自启、不计失败，`desired:"halt"`），`circuit open`=连续 5 次快速失败熔断**驻留**（等待人工 Start，supervisor 不再自动重试也不再需要重启整个 supervisor 才恢复）；`stopped`=supervisor 全局停机。`desired` 为运维意图（`run|halt`，内存态不落盘——supervisor 重启即全新意图，双服务自动回来）。`probe` 为 supervisor 对各服务**直连**（sync 打 `/api/health`、web 打 `/`）的探活结果。
 
-**防环铁律**（supervisor 与本端点的边界）：控制权只在 supervisor（服务端只存数、不给数、不下令）；探活直连各服务端口、绝不借道兄弟进程；推送失败只记日志、保留旧快照，永不参与重启决策。管理页在 `available:false` 时按「管理层未接入」降级展示，其余管理功能不受影响。
+**防环铁律**（supervisor 与本端点的边界，⑩ 的命令邮箱不破）：控制权只在 supervisor（服务端只存数、只转运运维者排队的命令、永不自生成、绝不自己执行）；探活直连各服务端口、绝不借道兄弟进程；推送/命令捎带失败只记日志、保留旧快照，永不参与重启决策。管理页在 `available:false` 时按「管理层未接入」降级展示，其余管理功能不受影响；管理页的 Stop 按钮对 sync-server 会先警示——停了它邮箱即熄火，「全家停」永远留在 OS 层（stop.bat/托盘退出/uninstall），这是设计而非缺陷。
 
 ### 6.7 管理页聚合统计 /api/admin/stats（管理页可观测性）
 

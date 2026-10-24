@@ -251,7 +251,7 @@ step('copy exes', () => {
 const CRLF = (s) => s.replace(/\n/g, '\r\n') + '\r\n';
 
 const startBat = CRLF(`@echo off
-rem Readest self-host server (ROADMAP ⑦): readest-supervisor starts BOTH
+rem Readest self-host server (ROADMAP ⑦/⑩): readest-supervisor starts BOTH
 rem services (sync server :8080 + web reader :3000) and supervises them —
 rem crash-restarts with backoff, live dashboard, and both services stop the
 rem moment the supervisor itself stops. Requires Node.js (>= 20) on PATH.
@@ -265,7 +265,11 @@ echo   Sync server    :  http://localhost:8080/api/health
 echo   Data directory :  %~dp0data
 echo.
 echo   The dashboard runs in its own window ("Readest Server"): live status,
-echo   latency and memory of both services; press q there to stop everything.
+echo   latency and memory of both services. There: arrows select a service,
+echo   s/x/r = start/stop/restart it, q stops everything. Running it again
+echo   ATTACHES to the live instance instead (q only detaches).
+echo   Autostart at login:   readest-supervisor.exe install
+echo   Remove it:            readest-supervisor.exe uninstall
 echo   Headless mode (services / task scheduler):  readest-supervisor.exe --headless
 echo   First admin account (run here once):
 echo       sync-server.exe add-user ^<email^> --admin
@@ -291,14 +295,40 @@ What is inside
   readest-supervisor.exe  THE entry point: starts and supervises both
                     services. Dashboard TUI by default (--headless for
                     services); restarts crashed services with backoff
-                    (1s/4s/16s, gives up after 5 rapid failures and says
-                    why); both services stop together with it.
+                    (1s/4s/16s; after 5 rapid failures the circuit opens
+                    and waits for an operator start — press s in the
+                    dashboard, or the Start button on the admin page);
+                    both services stop together with it. A tray icon
+                    offers start/stop/restart, autostart, the admin page
+                    and full quit; --no-tray disables it.
   sync-server.exe   Sync/auth/OPDS/admin API + book storage (port 8080).
   web\\              Web reader + admin console, standalone Next.js server
                     (port 3000). Needs Node.js >= 20 on PATH; no pnpm needed.
   start.bat         Opens the supervisor dashboard. stop.bat stops everything.
+  supervisor.port   Written at runtime: the observation socket of the live
+                    instance. Running readest-supervisor again ATTACHES to
+                    it (same dashboard, q only detaches) — there is never a
+                    second set of services.
   logs\\             Per-service log files (also shown in the dashboard).
   data\\             Created on first start: SQLite DB + book files.
+
+Manual control (dashboard or admin page's Server Monitor tab)
+  Arrows select a service, s/x/r = start/stop/restart it. Stop keeps it
+  down until a start (not counted as a failure); start clears the failure
+  counter and any circuit and starts immediately. The admin page's Server
+  Monitor tab has the same three buttons per service (needs ADMIN_TOKEN);
+  stopping sync-server there warns first — that stop kills the panel's own
+  recovery channel, so restart it from the dashboard, the tray, or by
+  restarting the supervisor.
+
+Autostart at login (no admin rights)
+  readest-supervisor.exe install     register + print what was created
+  readest-supervisor.exe uninstall   remove the registration AND stop the
+                                     running instance (full termination)
+  readest-supervisor.exe uninstall --keep-running   only unregister
+  Autostarted instances run --headless (tray + attach + admin page are
+  their control surfaces). A plain stop (stop.bat) survives: the next
+  logon brings everything back.
 
 First run
   1. Double-click start.bat (the dashboard window opens).
@@ -321,16 +351,17 @@ Configuration (same .env file as the sync server, beside the exes)
   QUOTA_BYTES   Per-user storage quota     (default 2 GiB)
   ADMIN_TOKEN   Break-glass API token for /api/admin; ALSO enables the
                 supervisor's metrics feed for the admin console's
-                Server Monitor tab (pushed locally every 5s)
+                Server Monitor tab (pushed locally every 5s) and its
+                start/stop/restart buttons
   READEST_NODE  Path to the node executable (default: node.exe beside the
                 exes if present, else PATH)
 
-Run as a service (optional)
-  Use the supervisor's headless mode, not the dashboard:
-    NSSM:  nssm install ReadestServer "<path>\\readest-supervisor.exe" --headless
-    schtasks /Create /TN ReadestServer /SC ONLOGON /TR "<path>\\readest-supervisor.exe --headless"
-  (The supervisor keeps both services alive; whatever restarts the supervisor
-  itself covers the last gap.)
+Run before login / as a Windows service (optional)
+  The Startup shortcut from "install" covers the logged-in case. For a
+  true pre-logon service use the supervisor's headless mode under NSSM:
+    nssm install ReadestServer "<path>\\readest-supervisor.exe" --headless
+  (The supervisor keeps both services alive; whatever restarts the
+  supervisor itself covers the last gap.)
 
 Updating
   Replace readest-supervisor.exe, sync-server.exe and web\\ with the new
