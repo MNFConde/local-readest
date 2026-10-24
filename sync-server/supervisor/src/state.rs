@@ -16,6 +16,10 @@ pub enum Phase {
     Running,
     Restarting,
     CircuitOpen,
+    /// Operator pressed Stop: suppressed and parked until an operator Start
+    /// or a supervisor restart (⑩). Distinct from `Stopped`, which is the
+    /// terminal phase during global shutdown.
+    Halted,
     Stopped,
 }
 
@@ -26,7 +30,48 @@ impl Phase {
             Phase::Running => "running",
             Phase::Restarting => "restarting",
             Phase::CircuitOpen => "circuit open",
+            Phase::Halted => "halted",
             Phase::Stopped => "stopped",
+        }
+    }
+
+    /// Parse the wire label back (attach client reconstructs a local Dash
+    /// from observation frames; unknown labels render as starting).
+    pub fn from_label(label: &str) -> Phase {
+        match label {
+            "running" => Phase::Running,
+            "restarting" => Phase::Restarting,
+            "circuit open" => Phase::CircuitOpen,
+            "halted" => Phase::Halted,
+            "stopped" => Phase::Stopped,
+            _ => Phase::Starting,
+        }
+    }
+}
+
+/// Operator intent for one service (⑩): Run = keep it alive (the normal
+/// supervision state), Halt = suppressed by a manual Stop. In-memory only on
+/// purpose — a reboot is a fresh intent, so an autostarted supervisor always
+/// brings both services back and never lingers in a "registered but halted"
+/// zombie state.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Desired {
+    Run,
+    Halt,
+}
+
+impl Desired {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Desired::Run => "run",
+            Desired::Halt => "halt",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Desired {
+        match label {
+            "halt" => Desired::Halt,
+            _ => Desired::Run,
         }
     }
 }
@@ -47,6 +92,10 @@ pub struct ExitInfo {
 #[derive(Debug)]
 pub struct ServiceStatus {
     pub phase: Phase,
+    /// Operator intent (⑩): Run = supervised, Halt = manually suppressed.
+    /// Display + snapshot only — the runner's actual driver is its command
+    /// queue; this mirrors it for the TUI / admin page / attach clients.
+    pub desired: Desired,
     pub pid: Option<u32>,
     pub started_at: Option<Instant>,
     pub restarts: u32,
@@ -66,6 +115,7 @@ impl ServiceStatus {
     pub fn new(phase: Phase) -> Self {
         Self {
             phase,
+            desired: Desired::Run,
             pid: None,
             started_at: None,
             restarts: 0,
@@ -133,7 +183,9 @@ impl Slot {
 }
 
 pub struct Dash {
-    pub started: Instant,
+    /// Supervisor start (attach clients re-anchor this from their first
+    /// frame; behind a Mutex because the attach reader task writes it).
+    pub started: Mutex<Instant>,
     pub sync: Mutex<ServiceStatus>,
     pub web: Mutex<ServiceStatus>,
     pub push: Mutex<PushInfo>,
@@ -142,11 +194,22 @@ pub struct Dash {
 impl Dash {
     pub fn new() -> Self {
         Self {
-            started: Instant::now(),
+            started: Mutex::new(Instant::now()),
             sync: Mutex::new(ServiceStatus::new(Phase::Starting)),
             web: Mutex::new(ServiceStatus::new(Phase::Starting)),
             push: Mutex::new(PushInfo::disabled()),
         }
+    }
+
+    pub fn started_elapsed(&self) -> Duration {
+        self.started
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .elapsed()
+    }
+
+    pub fn set_started(&self, at: Instant) {
+        *self.started.lock().unwrap_or_else(|e| e.into_inner()) = at;
     }
 
     pub fn status(&self, slot: Slot) -> MutexGuard<'_, ServiceStatus> {

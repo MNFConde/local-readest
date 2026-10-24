@@ -51,7 +51,9 @@ mod imp {
                     std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
                 );
                 if ok == 0 {
-                    eprintln!("supervisor: SetInformationJobObject failed — hard-kill cleanup degraded");
+                    eprintln!(
+                        "supervisor: SetInformationJobObject failed — hard-kill cleanup degraded"
+                    );
                     return 0usize;
                 }
                 job as usize
@@ -65,9 +67,11 @@ mod imp {
         if job == 0 {
             return;
         }
-        let Some(handle) = child.raw_handle() else { return };
+        let Some(handle) = child.raw_handle() else {
+            return;
+        };
         unsafe {
-            if AssignProcessToJobObject(job as *mut core::ffi::c_void, handle as *mut core::ffi::c_void) == 0 {
+            if AssignProcessToJobObject(job as *mut core::ffi::c_void, handle) == 0 {
                 eprintln!("supervisor: AssignProcessToJobObject failed — this child may survive a hard kill");
             }
         }
@@ -95,12 +99,19 @@ mod imp {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         for pid in pids {
-            unsafe {
-                let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
-                if h != INVALID_HANDLE_VALUE && !h.is_null() {
-                    TerminateProcess(h, 1);
-                    CloseHandle(h);
-                }
+            kill_pid(pid);
+        }
+    }
+
+    /// Kill exactly one child by PID (⑩ manual Stop/Restart: the sibling
+    /// service must not even notice). Process-group semantics on Unix are
+    /// handled by `terminate_children`; here the pid IS the group leader.
+    pub fn kill_pid(pid: u32) {
+        unsafe {
+            let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if h != INVALID_HANDLE_VALUE && !h.is_null() {
+                TerminateProcess(h, 1);
+                CloseHandle(h);
             }
         }
     }
@@ -109,8 +120,6 @@ mod imp {
 #[cfg(unix)]
 mod imp {
     use std::sync::{Mutex, OnceLock};
-
-    use std::os::unix::process::CommandExt;
 
     static LIVE_PIDS: OnceLock<Mutex<Vec<u32>>> = OnceLock::new();
 
@@ -167,17 +176,22 @@ mod imp {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         for pid in pids {
-            unsafe {
-                libc::kill(-(pid as i32), libc::SIGKILL);
-            }
+            kill_pid(pid);
+        }
+    }
+
+    /// Kill exactly one child's process group (⑩ manual Stop/Restart).
+    pub fn kill_pid(pid: u32) {
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
         }
     }
 }
 
 #[cfg(windows)]
-pub use imp::{assign_child, init, register_pid, terminate_children, unregister_pid};
+pub use imp::{assign_child, init, kill_pid, register_pid, terminate_children, unregister_pid};
 
 #[cfg(unix)]
 pub use imp::{
-    assign_child, init, prepare, register_pid, terminate_children, unregister_pid,
+    assign_child, init, kill_pid, prepare, register_pid, terminate_children, unregister_pid,
 };

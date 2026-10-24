@@ -1,7 +1,7 @@
 //! Pure restart-policy decisions, kept side-effect free so the backoff and
 //! circuit-breaker behavior can be unit-tested without spawning anything.
 //!
-//! Semantics (ROADMAP 待办⑦):
+//! Semantics (ROADMAP 待办⑦;⑩ 增补手动控制后的完整状态图见 service.rs):
 //!   * a run that lasted >= MIN_RUN_FOR_RESET counts as "it worked for a
 //!     while" — the rapid-failure counter resets, so a nightly crash still
 //!     restarts immediately instead of creeping to 16s delays forever;
@@ -9,9 +9,13 @@
 //!     (1s → 4s → 16s, capped), so a port conflict does not turn into a
 //!     fork bomb;
 //!   * MAX_CONSECUTIVE_FAILURES rapid failures in a row open the circuit:
-//!     the service stays down with a logged reason. Restarting can only
-//!     succeed after the operator fixes the cause — retry-looping forever
-//!     would only hide it.
+//!     from ⑩ on the service then stays down with a logged reason WAITING
+//!     for an operator Start (used to be: the runner exits and only a
+//!     supervisor restart recovered). Retry-looping forever would only hide
+//!     the cause — "only a human recovers it" is unchanged;
+//!   * an operator-initiated exit (manual Stop or Restart, ⑩) is never a
+//!     failure: Stop must not burn backoff budget or creep toward the
+//!     circuit breaker just because someone did maintenance.
 
 use std::time::Duration;
 
@@ -38,6 +42,34 @@ pub fn ran_long_enough_to_reset(uptime: Duration) -> bool {
 /// True when the rapid-failure count should stop the restart loop entirely.
 pub fn should_circuit_break(consecutive_failures: u32) -> bool {
     consecutive_failures >= MAX_CONSECUTIVE_FAILURES
+}
+
+/// How one child exit affects the rapid-failure counter. The four outcomes
+/// (ROADMAP ⑩): an operator action is blameless; a long run forgives earlier
+/// rapid failures; a short natural run is counted; zero-uptime crashes count
+/// hardest of all (still just one tick, but never reset).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ExitAccounting {
+    /// Operator Stop/Restart killed it: the counter is untouched — a
+    /// maintenance stop must not eat backoff budget or creep toward the
+    /// circuit breaker.
+    Operator,
+    /// Ran long enough to forgive earlier rapid failures (counter → 0).
+    Reset,
+    /// Died on its own quickly: counts toward the backoff ladder/breaker.
+    Count,
+}
+
+/// Classify one exit. `operator_action` is true whenever this exit was
+/// caused by a manual command (Stop or Restart), regardless of uptime.
+pub fn classify_exit(uptime: Duration, operator_action: bool) -> ExitAccounting {
+    if operator_action {
+        ExitAccounting::Operator
+    } else if ran_long_enough_to_reset(uptime) {
+        ExitAccounting::Reset
+    } else {
+        ExitAccounting::Count
+    }
 }
 
 #[cfg(test)]
@@ -77,14 +109,56 @@ mod tests {
     fn a_long_run_then_two_short_ones_stay_below_the_break() {
         // 30s run resets the counter, so two rapid failures land at 2 — the
         // service gets its exponential delay but is not given up on.
-        let mut failures = 0u32;
         assert!(ran_long_enough_to_reset(Duration::from_secs(600)));
-        failures = 0;
+        let mut failures = 0u32;
         failures += 1;
         assert_eq!(backoff_delay(failures), Duration::from_secs(1));
         assert!(!should_circuit_break(failures));
         failures += 1;
         assert_eq!(backoff_delay(failures), Duration::from_secs(4));
         assert!(!should_circuit_break(failures));
+    }
+
+    // ── ⑩ manual-control branches ─────────────────────────────────────────
+
+    #[test]
+    fn manual_stop_is_blameless_even_after_a_blink() {
+        // A Stop that lands while the child is still young must not count as
+        // a rapid failure: maintenance stops never burn backoff budget.
+        assert_eq!(
+            classify_exit(Duration::from_secs(2), true),
+            ExitAccounting::Operator
+        );
+        assert_eq!(
+            classify_exit(Duration::ZERO, true),
+            ExitAccounting::Operator
+        );
+    }
+
+    #[test]
+    fn manual_restart_is_blameless_too() {
+        // Restart kills a healthy child mid-run; the ensuing start is a
+        // fresh operator intent, not a failure of the old one.
+        assert_eq!(
+            classify_exit(Duration::from_secs(120), true),
+            ExitAccounting::Operator
+        );
+    }
+
+    #[test]
+    fn natural_rapid_failure_counts_even_at_zero_uptime() {
+        assert_eq!(
+            classify_exit(Duration::from_secs(3), false),
+            ExitAccounting::Count
+        );
+        assert_eq!(classify_exit(Duration::ZERO, false), ExitAccounting::Count);
+    }
+
+    #[test]
+    fn natural_long_run_resets() {
+        assert_eq!(
+            classify_exit(Duration::from_secs(30), false),
+            ExitAccounting::Reset
+        );
     }
 }

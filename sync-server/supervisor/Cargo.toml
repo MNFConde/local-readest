@@ -19,8 +19,13 @@ serde_json = "1"
 sysinfo = "0.33"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-util", "process", "net", "time", "sync"] }
 
+# Tray is Windows-only (⑩ P4 finding): tray-icon's Linux backend is the GTK
+# stack (muda → glib/gdk/pango system deps) — a headless server build must
+# not require it. Linux control surfaces: systemctl, attach TUI, admin page.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_JobObjects", "Win32_System_Threading", "Win32_Foundation", "Win32_Security"] }
+png = "0.17"
+tray-icon = "0.21"
+windows-sys = { version = "0.59", features = ["Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_Foundation", "Win32_Security", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

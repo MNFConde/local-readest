@@ -39,6 +39,8 @@ struct ProbeSnap {
 struct ServiceSnap {
     name: &'static str,
     state: &'static str,
+    /// Operator intent (⑩): "run" = supervised, "halt" = manually suppressed.
+    desired: &'static str,
     pid: Option<u32>,
     uptime_secs: Option<u64>,
     restarts: u32,
@@ -94,6 +96,7 @@ pub fn build_snapshot_json(
         services.push(ServiceSnap {
             name: slot.name(),
             state: st.phase.label(),
+            desired: st.desired.label(),
             pid: st.pid,
             uptime_secs: st.uptime().map(|d| d.as_secs()),
             restarts: st.restarts,
@@ -118,7 +121,7 @@ pub fn build_snapshot_json(
         supervisor: SupervisorSnap {
             version,
             pid: std::process::id(),
-            uptime_secs: dash.started.elapsed().as_secs(),
+            uptime_secs: dash.started_elapsed().as_secs(),
             headless,
         },
         host: host.clone(),
@@ -209,6 +212,13 @@ pub async fn run_metrics(dash: Arc<Dash>, mut kill: watch::Receiver<bool>) {
 
 /// Push the snapshot to the sync server's /api/admin/host-snapshot every
 /// PUSH_INTERVAL. Failures are display-only (see the module comment).
+///
+/// ⑩: the response body carries pending admin-page service commands back —
+/// the operator's intent, stored server-side, relayed on the ONE transport
+/// this task already owns. The server only stores and forwards; it never
+/// invents commands, and a failed/absent response changes nothing here (the
+/// mailbox simply stays queued until the next push or its 60s TTL).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_pusher(
     dash: Arc<Dash>,
     host: HostStatic,
@@ -216,6 +226,7 @@ pub async fn run_pusher(
     admin_token: Option<String>,
     version: &'static str,
     headless: bool,
+    hub: crate::cmd::CommandHub,
     mut kill: watch::Receiver<bool>,
 ) {
     let Some(token) = admin_token else {
@@ -231,19 +242,21 @@ pub async fn run_pusher(
     let url_path = "/api/admin/host-snapshot";
     loop {
         let body = build_snapshot_json(&dash, &host, version, headless);
-        let outcome = probe::post_json(&sync_addr, url_path, &token, &body, Duration::from_secs(3)).await;
+        let outcome =
+            probe::post_json(&sync_addr, url_path, &token, &body, Duration::from_secs(3)).await;
         // Scope the lock so it never sits across the select await below
         // (std guards are not async-aware; holding one would make this task
         // !Send and also block the TUI's reads).
         {
             let mut p = dash.push.lock().unwrap_or_else(|e| e.into_inner());
             match outcome {
-                Ok(status) if (200..300).contains(&status) => {
+                Ok((status, response)) if (200..300).contains(&status) => {
                     p.last_ok = Some(std::time::Instant::now());
                     p.last_error = None;
                     p.last_error_at = None;
+                    relay_admin_commands(&dash, &hub, &response);
                 }
-                Ok(status) => {
+                Ok((status, _)) => {
                     p.last_error = Some(format!("HTTP {status}"));
                     p.last_error_at = Some(std::time::Instant::now());
                 }
@@ -256,6 +269,38 @@ pub async fn run_pusher(
         tokio::select! {
             _ = tokio::time::sleep(PUSH_INTERVAL) => {}
             _ = kill.changed() => return,
+        }
+    }
+}
+
+/// `{"commands":[{"service":"web","command":"stop"}]}` → the command queue.
+/// A malformed or legacy (204/empty) body simply means no commands.
+fn relay_admin_commands(dash: &Dash, hub: &crate::cmd::CommandHub, response: &str) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(response) else {
+        return;
+    };
+    let Some(list) = value.get("commands").and_then(|c| c.as_array()) else {
+        return;
+    };
+    for entry in list {
+        let (Some(service), Some(command)) = (
+            entry.get("service").and_then(|v| v.as_str()),
+            entry.get("command").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        match hub.send_from_labels(service, command) {
+            Ok(()) => {
+                let slot = if service == "web" {
+                    Slot::Web
+                } else {
+                    Slot::Sync
+                };
+                dash.status(slot).push_log(format!(
+                    "[supervisor] command from admin page: {command} {service}"
+                ));
+            }
+            Err(e) => eprintln!("supervisor: admin-page command rejected: {e}"),
         }
     }
 }
@@ -283,20 +328,24 @@ pub fn summarize(dash: &Dash) -> String {
             Some(_) => "down".into(),
             None => "—".into(),
         };
+        let icon = match st.phase {
+            Phase::Running => "●",
+            Phase::Starting => "○",
+            Phase::Restarting => "↻",
+            Phase::CircuitOpen => "✖",
+            Phase::Halted => "▪",
+            Phase::Stopped => "■",
+        };
+        let cpu = format!("{:.1}%", st.cpu_percent);
+        let restarts = format!("restarts {}", st.restarts);
         parts.push(format!(
             "{} {} pid {} {} {} {} probe {}",
             slot.name(),
-            match st.phase {
-                Phase::Running => "●",
-                Phase::Starting => "○",
-                Phase::Restarting => "↻",
-                Phase::CircuitOpen => "✖",
-                Phase::Stopped => "■",
-            },
+            icon,
             st.pid.unwrap_or(0),
             human_bytes(st.mem_bytes),
-            format!("{:.1}%", st.cpu_percent),
-            format!("restarts {}", st.restarts),
+            cpu,
+            restarts,
             probe,
         ));
     }
