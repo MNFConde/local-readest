@@ -5,6 +5,8 @@
 - `main` = 官方 `readest/readest` 的镜像，只 fast-forward（`git fetch official && git merge --ff-only official/main`）
 - `selfhosted` = `main` + 本补丁 + `sync-server/`（Rust 重写的同步服务端）+ 契约文档/测试
 
+> 最终用户请看 [user-guide.md](./user-guide.md)（部署与使用手册）；本 README 面向开发者。
+
 ## 跟上游循环
 
 客户端改动已直接提交在 `selfhosted` 分支（早已不走 patch 重放），跟上游就是普通 merge；完整流程、rerere/lockfile 处理、解耦守卫与冒烟闸见 [contributing.md](./contributing.md) 的「上游合并循环」。

@@ -4,8 +4,9 @@
 // the SELFHOSTED blocks that used to live inline in
 // app/auth/components/EmailPasswordAuth.tsx — the shared file now stays
 // upstream text plus a one-line early return. Sign-in only (view switching
-// is a Supabase-flow concern): runtime server address + account (email) +
-// optional password (passwordless accounts).
+// is a Supabase-flow concern): runtime server address + account (username
+// or email — the server treats it as an opaque identifier) + optional
+// password (passwordless accounts).
 
 import { useEffect, useState } from 'react';
 import { useTranslation } from '@/hooks/useTranslation';
@@ -108,7 +109,7 @@ export default function SelfhostedAuthForm({ onSelfhostedLogin }: SelfhostedAuth
           setError(_('Too many failed attempts. This device is temporarily locked.'));
         }
       } else {
-        setError(_('Incorrect email or password'));
+        setError(_('Incorrect account or password'));
       }
     } finally {
       setLoading(false);
@@ -142,14 +143,17 @@ export default function SelfhostedAuthForm({ onSelfhostedLogin }: SelfhostedAuth
       </div>
       <div className='flex flex-col'>
         <label className='flex select-none items-center justify-between px-1 py-2' htmlFor='email'>
-          <span className='text-sm'>{_('Email address')}</span>
+          <span className='text-sm'>{_('Account')}</span>
         </label>
         <input
           id='email'
           name='email'
-          type='email'
+          // type='text' (not 'email'): the server accepts any account
+          // identifier, and native browser validation would block plain
+          // usernames. name/id stay 'email' — that is the API field name.
+          type='text'
           required
-          placeholder={_('Your email address')}
+          placeholder={_('Account or email')}
           autoComplete='username'
           className='input eink-bordered w-full rounded-lg placeholder:text-sm'
           disabled={loading}

@@ -1,8 +1,10 @@
 {
   "Sign in with the account and password of your self-hosted sync server.": "Sign in with the account and password of your self-hosted sync server.",
   "self-hosted": "self-hosted",
+  "Account": "Account",
+  "Account or email": "Account or email",
   "Sync server address": "Sync server address",
-  "Incorrect email or password": "Incorrect email or password",
+  "Incorrect account or password": "Incorrect account or password",
   "Cannot connect to the sync server. Check that the server is running and the server address is correctly configured in the app.": "Cannot connect to the sync server. Check that the server is running and the server address is correctly configured in the app.",
   "Please enter your sync server address above before signing in.": "Please enter your sync server address above before signing in.",
   "The sync server encountered an internal error. Please check the server logs and try again later.": "The sync server encountered an internal error. Please check the server logs and try again later.",
