@@ -9,6 +9,7 @@ import {
 import { BookFormat, FIXED_LAYOUT_FORMATS, ViewSettings } from '@/types/book';
 import {
   themes,
+  getDefaultThemeColor,
   Palette,
   CustomTheme,
   generateLightPalette,
@@ -19,7 +20,14 @@ import { isDialogueHighlightActive } from './dialogueHighlight';
 import { readStoredAmbientIsDarkMode } from './ambientLight';
 import { INLINE_FORMATTING_SELECTOR } from './inlineTags';
 import { getOSPlatform } from './misc';
-import { SCROLL_WRAPPER_CLASS, SCROLL_WRAPPER_FIT_CLASS } from './scrollable';
+import { WHITE_TRANSPARENCY_FILTER } from './imageBackground';
+import { classifyAndTagStandaloneDiagrams } from './imageClassifier';
+import {
+  LINK_HIT_AREA_CLASS,
+  LINK_HIT_AREA_PX,
+  SCROLL_WRAPPER_CLASS,
+  SCROLL_WRAPPER_FIT_CLASS,
+} from './scrollable';
 
 /**
  * Build the resolved CSS font-family lists (serif / sans-serif / monospace)
@@ -117,6 +125,7 @@ const getFontStyles = (
   minFontSize: number,
   fontWeight: number,
   overrideFont: boolean,
+  ignorePublisherFonts: string[],
 ) => {
   const families = buildFontFamilyLists(serif, sansSerif, monospace, defaultCJKFont);
   const defaultFontFamily = defaultFont.toLowerCase() === 'serif' ? '--serif' : '--sans-serif';
@@ -135,6 +144,7 @@ const getFontStyles = (
       --serif: ${families.serif};
       --sans-serif: ${families.sansSerif};
       --monospace: ${families.monospace};
+      ${overrideFont ? '' : ignorePublisherFonts.map((f) => `--book-${f}: var(--${f});`).join(' ')}
       --font-size: ${fontSize}px;
       --min-font-size: ${minFontSize}px;
       --font-weight: ${fontWeight};
@@ -296,30 +306,44 @@ const getDialogueHighlightStyles = (viewSettings: ViewSettings, themeCode: Theme
     viewSettings.dialogueHighlightCustomTextColor && viewSettings.dialogueHighlightTextColor
       ? `\n    color: ${viewSettings.dialogueHighlightTextColor} !important;`
       : '';
+  // A thin outline works even when the font has only regular/bold faces.
+  const weight =
+    viewSettings.dialogueHighlightWeight === 'slightly-heavier'
+      ? '\n    -webkit-text-stroke: 0.2px currentColor !important;'
+      : viewSettings.dialogueHighlightWeight === 'bold'
+        ? '\n    font-weight: bold !important;'
+        : '';
   return `
   /* Dialogue lines tinted with the custom color or, by default, the theme's
      primary color. !important so the tint survives "Override Book Color",
      which repaints spans/paragraphs with the theme background at the same
      importance level but lower specificity. */
-  .readest-dialogue {${bgDecl(22)}${text}
+  .readest-dialogue {${bgDecl(22)}${text}${weight}
     border-radius: 0.2em;
     box-decoration-break: clone;
     -webkit-box-decoration-break: clone;
   }
-  .readest-dialogue-block {${bgDecl(12)}${text}
+  .readest-dialogue-block {${bgDecl(12)}${text}${weight}
     border-radius: 0.3em;
   }${
     viewSettings.dialogueHighlightItalic
       ? `
   /* Italic runs marked like quoted dialogue; nested marks drop their own
      tint so overlapping translucent backgrounds don't stack. */
-  :is(i, em) {${bgDecl(22)}${text}
+  :is(i, em) {${bgDecl(22)}${text}${weight}
     border-radius: 0.2em;
     box-decoration-break: clone;
     -webkit-box-decoration-break: clone;
   }
   :is(i, em) :is(i, em, .readest-dialogue), .readest-dialogue :is(i, em) {
     background-color: transparent !important;
+  }`
+      : ''
+  }${
+    viewSettings.dialogueHighlightWeight === 'bold'
+      ? `
+  .readest-dialogue-block *, .readest-dialogue *${viewSettings.dialogueHighlightItalic ? ', :is(i, em) *' : ''} {
+    font-weight: bold !important;
   }`
       : ''
   }
@@ -332,12 +356,18 @@ const getColorStyles = (
   themeCode: ThemeCode,
   backgroundTextureId: string,
   isEink: boolean,
+  isFootnote: boolean,
+  transparentImageBackground: boolean,
 ) => {
   const { bg, fg, primary, isDarkMode } = themeCode;
   const hasBackgroundTexture = !!backgroundTextureId && backgroundTextureId !== 'none';
+  const texturedFootnote = isFootnote && hasBackgroundTexture;
   // Over a background texture, Override Book Color still forces the text
   // colors but fills backgrounds with transparent so the texture shows (#6712).
   const overrideBg = hasBackgroundTexture ? 'transparent' : bg;
+  // Tables keep the darker tint they get in dark mode (see `blockquote, table *`).
+  const tableBg =
+    hasBackgroundTexture || !isDarkMode ? overrideBg : `color-mix(in srgb, ${bg} 80%, #000)`;
   const colorStyles = `
     html {
       --bg-texture-id: ${backgroundTextureId};
@@ -347,7 +377,7 @@ const getColorStyles = (
       --override-color: ${overrideColor};
       color-scheme: ${isDarkMode ? 'dark' : 'light'};
     }
-    html, body {
+    ${texturedFootnote && !overrideColor ? 'html' : 'html, body'} {
       color: ${fg};
     }
     ${isEink ? getEinkSelectionStyles() : isDarkMode ? getDarkSelectionStyles(primary) : ''}
@@ -359,7 +389,8 @@ const getColorStyles = (
       background: var(--background-set, none);
     }
     body {
-      ${isEink ? `background-color: ${bg} !important;` : ''}
+      ${isEink && !texturedFootnote ? `background-color: ${bg} !important;` : ''}
+      ${texturedFootnote && overrideColor ? 'background-color: transparent !important;' : ''}
     }
     section, aside, blockquote, article, nav, header, footer, main, figure,
     div, p, font, h1, h2, h3, h4, h5, h6, li, span {
@@ -369,21 +400,51 @@ const getColorStyles = (
     }
     pre, span { /* inline code blocks */
       ${overrideColor ? `background-color: ${overrideBg} !important;` : ''}
+    }${
+      overrideColor
+        ? `
+    /* A book's own cell, row and column colors and background images give
+       way too (#7415). Whatever sits inside a cell is transparent, so it shows
+       the cell's color (or the texture) instead of a second shade behind the
+       text, and inherits its text color (the theme color from the cell, the
+       link color inside a link), so white text set for a dark cell stays
+       readable. The cell rule ties on specificity with p, span and pre above,
+       so it must come after them. */
+    table, colgroup, col, thead, tbody, tfoot, tr, th, td, caption {
+      background-color: ${tableBg} !important;
+      background-image: none !important;
+      color: ${fg} !important;
+      border-color: ${fg} !important;
+    }
+    :is(th, td, caption) * {
+      background-color: transparent !important;
+      color: inherit !important;
+    }`
+        : ''
     }
     a:any-link {
       ${overrideColor ? `color: ${primary} !important;` : isDarkMode ? `color: lightblue;` : ''}
+    }
+    /* left off hovered links, so a book's own a:hover style applies (#6859) */
+    a:any-link:where(:not(:hover)) {
       text-decoration: ${isEink ? 'underline' : 'none'};
     }
     body.pbg {
-      ${isDarkMode ? `background-color: ${bg} !important;` : ''}
+      ${isDarkMode && !texturedFootnote ? `background-color: ${bg} !important;` : ''}
     }
     /* When inverting in dark mode, invert(100%) must stay the effective filter
        (a later filter declaration would discard it), and multiply must not
        apply: multiply with a dark page background erases the image (#5250). */
     img {
-      ${isDarkMode && invertImgColorInDark ? 'filter: invert(100%);' : ''}
-      ${isDarkMode && !invertImgColorInDark && overrideColor ? 'filter: grayscale(100%) contrast(1.2) brightness(1.2);' : ''}
-      ${overrideColor && !(isDarkMode && invertImgColorInDark) ? 'mix-blend-mode: multiply;' : ''}
+      ${transparentImageBackground ? `filter: ${WHITE_TRANSPARENCY_FILTER}${isDarkMode && invertImgColorInDark ? ' invert(100%)' : ''};` : isDarkMode && invertImgColorInDark ? 'filter: invert(100%);' : ''}
+      ${!transparentImageBackground && isDarkMode && !invertImgColorInDark && overrideColor ? 'filter: grayscale(100%) contrast(1.2) brightness(1.2);' : ''}
+      ${!transparentImageBackground && overrideColor && !(isDarkMode && invertImgColorInDark) ? 'mix-blend-mode: multiply;' : ''}
+    }
+    ${
+      transparentImageBackground
+        ? `svg image { filter: ${WHITE_TRANSPARENCY_FILTER}${isDarkMode && invertImgColorInDark ? ' invert(100%)' : ''}; }
+    img, svg image { mix-blend-mode: normal !important; background-color: transparent !important; }`
+        : ''
     }
     svg, img {
       ${overrideColor ? `background-color: transparent !important;` : ''};
@@ -398,12 +459,42 @@ const getColorStyles = (
     p[width][height] > img:only-child {
       mix-blend-mode: multiply;
     }
-    /* inline images */
+    /* inline images and gaiji */
     *:has(> img.has-text-siblings):not(body) {
-      ${overrideColor ? `background-color: ${bg};` : ''}
+      ${overrideColor ? `background-color: ${overrideBg};` : ''}
     }
-    p img.has-text-siblings, span img.has-text-siblings, sup img.has-text-siblings {
+    *:has(> img[class*="gaiji"]):not(body) {
+      ${overrideColor ? `background-color: ${overrideBg};` : ''}
+    }
+    p img.has-text-siblings,
+    span img.has-text-siblings,
+    sup img.has-text-siblings,
+    img.has-text-siblings,
+    img[class*="gaiji"] {
+      ${
+        isDarkMode && !invertImgColorInDark
+          ? `filter: ${transparentImageBackground ? `${WHITE_TRANSPARENCY_FILTER} ` : ''}invert(1) hue-rotate(180deg);`
+          : ''
+      }
       mix-blend-mode: ${isDarkMode ? 'screen' : 'multiply'};
+    }
+    ${
+      isDarkMode
+        ? `*:has(> img.monochrome-diagram):not(body) {
+      ${overrideColor ? `background-color: ${overrideBg};` : ''}
+    }
+    img.monochrome-diagram {
+      ${
+        !invertImgColorInDark
+          ? `filter: ${transparentImageBackground ? `${WHITE_TRANSPARENCY_FILTER} ` : ''}invert(1) hue-rotate(180deg);`
+          : ''
+      }
+      mix-blend-mode: screen;
+    }
+    p[width][height] > img.monochrome-diagram:only-child {
+      mix-blend-mode: screen;
+    }`
+        : ''
     }
     table:has(> colgroup) {
       table-layout: fixed;
@@ -470,7 +561,7 @@ const getColorStyles = (
 
 export const LINK_TOUCH_HOLD_CLASS = 'link-touch-hold';
 export const TEXT_SELECTED_CLASS = 'text-selected';
-export const LINK_HIT_AREA_CLASS = 'link-hit-area';
+export { LINK_HIT_AREA_CLASS };
 export const MAX_ENLARGED_LINKS = 1000;
 
 const getPageLayoutStyles = (
@@ -483,6 +574,10 @@ const getPageLayoutStyles = (
   vertical: boolean,
 ) => `
   html {
+    /* The paginator forces this on the root in paginated mode only; scrolled
+       mode needs it too or a long URL runs past the viewport (#7154).
+       break-word, not anywhere: see the td, th rule (#5681). */
+    overflow-wrap: break-word !important;
     --margin-top: ${marginTop}px;
     --margin-right: ${marginRight}px;
     --margin-bottom: ${marginBottom}px;
@@ -493,6 +588,13 @@ const getPageLayoutStyles = (
     max-height: unset;
     -webkit-touch-callout: none;
     -webkit-user-select: text;
+  }
+  /* EBPAJ matter pages (title, credits, notices) put a vertical full-height box
+     in a horizontal root. Orthogonal to the root, its 100% is the whole
+     viewport, so end-aligned credits fall past the bottom margin (#7372).
+     Size it to the paginator's content box, which is right in any writing mode. */
+  body.paginated-mode > .main.vrtl.height-100per {
+    height: calc(var(--available-height) * 1px) !important;
   }
   body {
     overflow: unset;
@@ -512,6 +614,11 @@ const getPageLayoutStyles = (
   html.${LINK_TOUCH_HOLD_CLASS} a[href] {
     pointer-events: none !important;
   }
+  /* Linked images must still receive Android's long-press contextmenu. */
+  html.${LINK_TOUCH_HOLD_CLASS} a[href] img:not([zy-enlarge-src="none"]),
+  html.${LINK_TOUCH_HOLD_CLASS} a[href] svg:not([zy-enlarge-src="none"]) image {
+    pointer-events: auto !important;
+  }
   svg:where(:not([width])), img:where(:not([width])) {
     width: auto;
   }
@@ -528,7 +635,7 @@ const getPageLayoutStyles = (
   html.${LINK_HIT_AREA_CLASS} a::before {
     content: '';
     position: absolute;
-    inset: -10px;
+    inset: -${LINK_HIT_AREA_PX}px;
   }
   /* the enlarged area swallows the text around a link, so a selection dragged
      next to a footnote marker snaps away (#6566); set while text is selected */
@@ -603,6 +710,22 @@ const getPageLayoutStyles = (
     max-height: calc(var(--available-height) * 0.8 * 1px);
   }
 
+  body.paginated-mode img {
+    max-width: 100%;
+    max-height: calc(var(--available-height) * 1px);
+    object-fit: contain;
+  }
+
+  body.paginated-mode svg {
+    max-width: 100%;
+    max-height: calc(var(--available-height) * 1px);
+  }
+
+  body.scroll-mode img {
+    max-width: 100%;
+    object-fit: contain;
+  }
+
   figure.code {
     overflow: unset !important;
   }
@@ -621,6 +744,9 @@ const getPageLayoutStyles = (
     height: 1em;
   }
   img.has-text-siblings {
+    ${vertical ? 'width: 1em;' : 'height: 1em;'}
+  }
+  img[class*="gaiji"] {
     ${vertical ? 'width: 1em;' : 'height: 1em;'}
   }
   /* Baseline is only Readest's default: applyImageStyle adds this class when the
@@ -732,11 +858,19 @@ const getParagraphLayoutStyles = (
     hanging-punctuation: allow-end last;
     widows: 2;
   }
+  /* A book's li { margin: 0 2em } narrows the text again at every list level.
+     Override Book Layout drops the end side only: with ul { padding: 0 } the
+     start side is what keeps an outside marker on the page. */
   li {
     line-height: ${lineSpacing} ${overrideLayout ? '!important' : ''};
     -webkit-hyphens: ${hyphenate ? 'auto' : 'manual'} ${overrideLayout ? '!important' : ''};
     hyphens: ${hyphenate ? 'auto' : 'manual'} ${overrideLayout ? '!important' : ''};
+    ${overrideLayout ? 'margin-inline-end: unset !important;' : ''}
   }
+  /* Shrinks the browser's 40px list padding, and never grows it at large font
+     sizes. The layer loses to every unlayered book rule, a reset like
+     * { padding: 0 } included, and still beats the browser's. */
+  ${overrideLayout ? '@layer list-indent { ul, ol { padding-inline-start: min(1.5em, 40px); } }' : ''}
   p.aligned-center, blockquote.aligned-center,
   dd.aligned-center, div.aligned-center {
     text-align: center ${overrideLayout ? '!important' : ''};
@@ -1071,7 +1205,7 @@ export const getThemeCode = () => {
   let ambientIsDarkMode = false;
   let customThemes: CustomTheme[] = [];
   if (typeof window !== 'undefined') {
-    themeColor = localStorage.getItem('themeColor') || 'default';
+    themeColor = localStorage.getItem('themeColor') || getDefaultThemeColor();
     themeMode = localStorage.getItem('themeMode') || 'auto';
     systemIsDarkMode = localStorage.getItem('systemIsDarkMode') === 'true';
     ambientIsDarkMode = readStoredAmbientIsDarkMode(
@@ -1113,6 +1247,7 @@ export const getStyles = (
   viewSettings: ViewSettings,
   themeCode?: ThemeCode,
   customFonts: CustomFont[] = [],
+  isFootnote = false,
 ) => {
   if (!themeCode) {
     themeCode = getThemeCode();
@@ -1149,6 +1284,7 @@ export const getStyles = (
     viewSettings.minimumFontSize!,
     viewSettings.fontWeight!,
     viewSettings.overrideFont!,
+    viewSettings.ignorePublisherFonts ?? [],
   );
   // Inline `@font-face` rules for the caller-supplied custom fonts so
   // they ship to the iframe synchronously with the rest of the
@@ -1164,6 +1300,8 @@ export const getStyles = (
     themeCode,
     viewSettings.backgroundTextureId,
     viewSettings.isEink,
+    isFootnote,
+    !!viewSettings.transparentImageBackground,
   );
   const translationStyles = getTranslationStyles(viewSettings);
   const warichuStyles = getWarichuStyles();
@@ -1214,6 +1352,83 @@ export const applyTranslationStyle = (viewSettings: ViewSettings) => {
 
   document.head.appendChild(styleElement);
 };
+
+// "Ignore publisher font names" (#7276): a list that names a generic family is
+// wrapped as `var(--book-serif, Palatino, serif)`. --book-serif is only defined
+// while that category's switch is on, so until then the book's list applies.
+const wrapPublisherFonts = (families: string, rewriteGenerics = false) => {
+  // Strings, comments and escapes are indivisible; commas inside functions
+  // also belong to the current family. Use the same tokens for detection and
+  // replacement so quoted names and comment text stay byte-for-byte intact.
+  const tokens =
+    families.match(
+      /\/\*[\s\S]*?\*\/|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\\(?:[0-9a-fA-F]{1,6}\s?|[^\n\r\f])|[\w-]+|\s+|[^\s]/g,
+    ) ?? [];
+  const generics = new Set<string>();
+  let depth = 0;
+  let start = 0;
+  const finishFamily = (end: number) => {
+    const names: number[] = [];
+    for (let i = start; i < end; i++) {
+      if (!/^\s+$|^\/\*/.test(tokens[i]!)) names.push(i);
+    }
+    const index = names[0];
+    if (
+      names.length === 1 &&
+      index !== undefined &&
+      /^(serif|sans-serif|monospace)$/i.test(tokens[index]!)
+    ) {
+      const name = tokens[index]!.toLowerCase();
+      generics.add(name);
+      if (rewriteGenerics) tokens[index] = `var(--${name}, ${name})`;
+    }
+  };
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i] === '(') depth++;
+    else if (tokens[i] === ')') depth--;
+    else if (tokens[i] === ',' && depth === 0) {
+      finishFamily(i);
+      start = i + 1;
+    }
+  }
+  finishFamily(tokens.length);
+  if (!generics.size) return families;
+  const rewritten = tokens.join('');
+  const list = rewritten.trim();
+  const lead = rewritten.slice(0, rewritten.indexOf(list));
+  const wrapped = [...generics].reduceRight(
+    (fallback, name) => `var(--book-${name}, ${fallback})`,
+    list,
+  );
+  return lead + wrapped + rewritten.slice(lead.length + list.length);
+};
+
+const FONT_SIZE =
+  /^(?:(?:\d+(?:\.\d+)?|\.\d+)(?:[a-z]+|%)|x*-?(?:small|large)|medium|smaller|larger)$/i;
+
+// In a `font` shorthand the family list comes last, after the size and an
+// optional `/line-height`, e.g. `font: italic 1em/1.2 Palatino, serif`.
+const wrapFontShorthand = (match: string, prefix: string, value: string) => {
+  const [main = '', ...important] = value.split('!');
+  const words = [...main.matchAll(/[^\s/]+|\//g)];
+  const size = words.findIndex((word) => FONT_SIZE.test(word[0]));
+  if (size < 0) return match;
+  const start = words[words[size + 1]?.[0] === '/' ? size + 3 : size + 1]?.index;
+  if (start === undefined) return match;
+  const wrapped = wrapPublisherFonts(main.slice(start));
+  return [prefix + main.slice(0, start) + wrapped, ...important].join('!');
+};
+
+const FONT_SHORTHAND_REGEX = /((?:^|[\s;{])font\s*:)([^;{}]*)/gi;
+
+const wrapFontFamily = (_match: string, prefix: string, families: string) =>
+  prefix + wrapPublisherFonts(families);
+
+// `style` attributes don't pass through transformStylesheet.
+export const transformInlineFonts = (css: string) =>
+  css
+    .replace(/(font-family\s*:)([^;{}!]*)/gi, wrapFontFamily)
+    .replace(FONT_SHORTHAND_REGEX, wrapFontShorthand);
 
 export const transformStylesheet = (
   css: string,
@@ -1438,23 +1653,17 @@ export const transformStylesheet = (
     return match;
   });
 
-  // `@media (orientation: ...)` inside a section is evaluated against the
+  // Width and height media features inside a section are evaluated against the
   // iframe, and the paginator sizes that iframe to the whole multi-column strip
-  // rather than to a page: a one-page section reports portrait and a two-page
-  // section landscape. The strip width is itself derived from the content, so a
-  // rule that changes the content's height — `column-count: 2` in the IDPF
-  // media-query sample — flips the query, which flips the page count, which
-  // flips the query straight back, and the layout never settles (#6038).
-  // Resolve the feature against the reader's own viewport, the same thing the
-  // vw/vh rewrite below does and for the same reason, so the book gets the
-  // orientation the reader is actually in and the cycle cannot form.
-  // Width and height features are the same trap: a two-page section makes the
-  // strip twice as wide, so the sample's `(max-width: 480px)` block flips on the
-  // page count it is itself deciding. Both rewrites are confined to the prelude,
-  // between `@media` and the `{` that opens its block, so the same literal in a
-  // declaration value or an attribute selector is left as the book wrote it. The
-  // two sentinels below resolve to themselves, so the passes are order-free.
-  const isLandscape = vw > vh;
+  // rather than to a page. A two-page section makes the strip twice as wide, so
+  // the IDPF sample's `(max-width: 480px)` block flips on the page count it is
+  // itself deciding (#6038). Resolve them against the reader's own viewport,
+  // the same thing the vw/vh rewrite below does and for the same reason.
+  // `(orientation: ...)` is the same trap, but the reading area can turn while
+  // the book is open, so it is left for applyOrientationMedia to resolve on the
+  // parsed sheets. The rewrite is confined to the prelude, between `@media` and
+  // the `{` that opens its block, so the same literal in a declaration value or
+  // an attribute selector is left as the book wrote it.
   const always = '(min-width: 0px)';
   const never = '(min-width: 999999px)';
   // Park quoted values first, the same way the url() pass above does, so an
@@ -1465,24 +1674,20 @@ export const transformStylesheet = (
     return `READEST_STR_${quoted.length - 1}_PLACEHOLDER`;
   });
   css = css.replace(/@media[^{]*/gi, (prelude) =>
-    prelude
-      .replace(/\(\s*orientation\s*:\s*(landscape|portrait)\s*\)/gi, (_, mode: string) =>
-        (mode.toLowerCase() === 'landscape') === isLandscape ? always : never,
-      )
-      .replace(
-        /\(\s*(min|max)-(width|height)\s*:\s*([^)]+?)\s*\)/gi,
-        (feature, bound: string, axis: string, length: string) => {
-          // Only lengths that are already px can be resolved without guessing at
-          // the book's root font size; anything else keeps the authored feature.
-          const px = /^(\d*\.?\d+)(?:px)?$/.exec(length);
-          if (!px) return feature;
-          const viewport = axis.toLowerCase() === 'width' ? vw : vh;
-          const bounds = parseFloat(px[1]!);
-          return (bound.toLowerCase() === 'min' ? viewport >= bounds : viewport <= bounds)
-            ? always
-            : never;
-        },
-      ),
+    prelude.replace(
+      /\(\s*(min|max)-(width|height)\s*:\s*([^)]+?)\s*\)/gi,
+      (feature, bound: string, axis: string, length: string) => {
+        // Only lengths that are already px can be resolved without guessing at
+        // the book's root font size; anything else keeps the authored feature.
+        const px = /^(\d*\.?\d+)(?:px)?$/.exec(length);
+        if (!px) return feature;
+        const viewport = axis.toLowerCase() === 'width' ? vw : vh;
+        const bounds = parseFloat(px[1]!);
+        return (bound.toLowerCase() === 'min' ? viewport >= bounds : viewport <= bounds)
+          ? always
+          : never;
+      },
+    ),
   );
   css = css.replace(/READEST_STR_(\d+)_PLACEHOLDER/g, (_, i) => quoted[+i]!);
 
@@ -1536,21 +1741,15 @@ export const transformStylesheet = (
     .replace(/(font-family\s*:\s*)([^;{}]*)/gi, (_match: string, prefix: string, value: string) => {
       const important = /\s*!\s*important\s*$/i.exec(value);
       const families = important ? value.slice(0, important.index) : value;
-      const rewritten = families
-        .split(',')
-        .map((family: string) => {
-          const generic = /^(serif|sans-serif|monospace)$/i.exec(family.trim());
-          if (!generic) return family;
-          const name = generic[1]!.toLowerCase();
-          return family.replace(generic[1]!, `var(--${name}, ${name})`);
-        })
-        .join(',');
-      return prefix + rewritten + (important ? important[0] : '');
+      return prefix + wrapPublisherFonts(families, true) + (important ? important[0] : '');
     })
     .replace(/([\s;])font-weight\s*:\s*normal/gi, '$1font-weight: var(--font-weight)')
     .replace(/([\s;])color\s*:\s*black/gi, '$1color: var(--theme-fg-color)')
-    .replace(/([\s;])color\s*:\s*#000000/gi, '$1color: var(--theme-fg-color)')
-    .replace(/([\s;])color\s*:\s*#000/gi, '$1color: var(--theme-fg-color)')
+    // the whole hex value, or `#000` would also match the start of `#0000FF` (#6858)
+    .replace(
+      /([\s;])color\s*:\s*#(?:000f?|000000(?:ff)?)(?![0-9a-f])/gi,
+      '$1color: var(--theme-fg-color)',
+    )
     .replace(/([\s;])color\s*:\s*rgb\(0,\s*0,\s*0\)/gi, '$1color: var(--theme-fg-color)');
 
   const { isDarkMode, bg } = getThemeCode();
@@ -1568,7 +1767,7 @@ export const transformStylesheet = (
     });
   }
 
-  return css;
+  return css.replace(FONT_SHORTHAND_REGEX, wrapFontShorthand);
 };
 
 export const applyThemeModeClass = (document: Document, isDarkMode: boolean) => {
@@ -1648,6 +1847,44 @@ export const applyEinkModeAttribute = (document: Document, isEink: boolean) => {
   document.documentElement.setAttribute('data-eink', isEink ? 'true' : 'false');
 };
 
+type MediaNode = { media?: MediaList; styleSheet?: CSSStyleSheet | null; cssRules?: CSSRuleList };
+const authoredMedia = new WeakMap<MediaList, string>();
+
+/**
+ * Resolve the book's `@media (orientation: ...)` against the reading area.
+ *
+ * Inside a section the feature would describe the iframe, which the paginator
+ * sizes to the column strip or the chapter height, so the query and the
+ * content feed each other (#6038). Each feature in the parsed sheets is set to
+ * an always/never condition instead, and re-resolved from the authored text
+ * when the reading area turns. Only the media condition changes: selectors,
+ * specificity and the rest of the query stay as the book wrote them.
+ */
+export const applyOrientationMedia = (document: Document, isLandscape: boolean) => {
+  const visit = ({ media, styleSheet, cssRules }: MediaNode) => {
+    const authored = media ? (authoredMedia.get(media) ?? media.mediaText) : '';
+    if (media && /\(\s*orientation\s*:/i.test(authored)) {
+      authoredMedia.set(media, authored);
+      media.mediaText = authored.replace(
+        /\(\s*orientation\s*:\s*(landscape|portrait)\s*\)/gi,
+        (_, mode: string) =>
+          (mode.toLowerCase() === 'landscape') === isLandscape
+            ? '(min-width: 0px)'
+            : '(min-width: 999999px)',
+      );
+    }
+    if (styleSheet) visit(styleSheet);
+    for (const rule of Array.from(cssRules ?? [])) visit(rule as MediaNode);
+  };
+  for (const sheet of Array.from(document.styleSheets)) {
+    try {
+      visit(sheet);
+    } catch {
+      // A cross-origin sheet's rules can't be read; it keeps its own queries.
+    }
+  }
+};
+
 /**
   @param document should be the global `document`
 */
@@ -1669,7 +1906,54 @@ export const applyScrollbarStyle = (document: Document, hideScrollbar: boolean) 
   }
 };
 
-export const applyImageStyle = (document: Document) => {
+const INLINE_IMAGE_CONTAINER_TAGS = new Set([
+  'span',
+  'rb',
+  'ruby',
+  'rt',
+  'rp',
+  'em',
+  'strong',
+  'b',
+  'i',
+  'u',
+  's',
+  'small',
+  'sub',
+  'sup',
+  'mark',
+  'cite',
+  'q',
+]);
+
+const hasInlineTextSibling = (container: Element, targetNode: Node): boolean => {
+  const childNodes = Array.from(container.childNodes);
+  const idx = childNodes.indexOf(targetNode as ChildNode);
+  if (idx === -1) return false;
+
+  for (const step of [-1, 1]) {
+    for (let i = idx + step; i >= 0 && i < childNodes.length; i += step) {
+      const node = childNodes[i]!;
+      if (node.nodeType === Node.TEXT_NODE && node.textContent?.trim()) {
+        return true;
+      }
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const el = node as Element;
+        const tag = el.tagName.toLowerCase();
+        if (tag === 'br' || el.querySelector('br')) {
+          break;
+        }
+        if (INLINE_IMAGE_CONTAINER_TAGS.has(tag) && el.textContent?.trim()) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+};
+
+export const applyImageStyle = (document: Document, isDarkMode = false, isFixedLayout = false) => {
   const win = document.defaultView ?? window;
   // Two-phase (read then write): reading getComputedStyle after a class/style
   // write forces a style recalc, so gather every decision first and apply the
@@ -1697,16 +1981,39 @@ export const applyImageStyle = (document: Document) => {
 
     let inlineWithText = false;
     let keepBaseline = false;
+    const isGaiji = !!(img.className && /(?:^|\s)gaiji(?:-|\s|$)/i.test(img.className));
     const parent = img.parentNode;
     if (parent && parent.nodeType === Node.ELEMENT_NODE) {
-      const childNodes = Array.from(parent.childNodes);
-      const hasTextSiblings = childNodes.some(
-        (node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim(),
-      );
-      const isInline = childNodes.every(
-        (node) => node.nodeType !== Node.ELEMENT_NODE || (node as Element).tagName !== 'BR',
-      );
-      inlineWithText = hasTextSiblings && isInline;
+      let hasTextSiblings = false;
+      let targetNode: Node = img;
+      let container: Element | null = parent as Element;
+
+      while (container) {
+        if (hasInlineTextSibling(container, targetNode)) {
+          hasTextSiblings = true;
+          break;
+        }
+        const hasBrInWrapper = Array.from(container.childNodes).some(
+          (node) =>
+            node.nodeType === Node.ELEMENT_NODE && (node as Element).tagName.toUpperCase() === 'BR',
+        );
+        if (hasBrInWrapper) break;
+
+        const parentElem: Element | null = container.parentElement;
+        if (parentElem && INLINE_IMAGE_CONTAINER_TAGS.has(container.tagName.toLowerCase())) {
+          targetNode = container;
+          container = parentElem;
+        } else {
+          break;
+        }
+      }
+      // A glyph image standing in for a character is never sized as a share
+      // of the line; a title image the book sizes that way keeps it (#7039).
+      // computedStyleMap keeps the percentage that getComputedStyle resolves,
+      // also inside a calc() (serialized as e.g. `calc(30% - 1px)`).
+      const width = img.computedStyleMap?.().get('width');
+      const percentSized = !!width && width.toString().includes('%');
+      inlineWithText = (hasTextSiblings || isGaiji) && !percentSized;
       if (inlineWithText) {
         // Only supply Readest's baseline default when the book leaves
         // vertical-align at its initial value; an author-set value (e.g. a CJK
@@ -1727,6 +2034,23 @@ export const applyImageStyle = (document: Document) => {
     };
   });
 
+  const rootStyle = document.documentElement?.style;
+  const availableHeight = rootStyle
+    ? parseFloat(rootStyle.getPropertyValue('--available-height'))
+    : NaN;
+  const baseHeight =
+    !isNaN(availableHeight) && availableHeight > 0
+      ? availableHeight
+      : (win?.innerHeight ?? window.innerHeight);
+
+  const availableWidth = rootStyle
+    ? parseFloat(rootStyle.getPropertyValue('--available-width'))
+    : NaN;
+  const baseWidth =
+    !isNaN(availableWidth) && availableWidth > 0
+      ? availableWidth
+      : (win?.innerWidth ?? window.innerWidth);
+
   for (const {
     img,
     percentWidth,
@@ -1738,12 +2062,15 @@ export const applyImageStyle = (document: Document) => {
   } of plans) {
     leadingImageParagraph?.classList.add('leading-image');
     if (!isNaN(percentWidth)) {
-      img.style.width = `${(percentWidth / 100) * window.innerWidth}px`;
+      img.style.width = `${(percentWidth / 100) * baseWidth}px`;
       img.removeAttribute('width');
     }
     if (!isNaN(percentHeight)) {
-      img.style.height = `${(percentHeight / 100) * window.innerHeight}px`;
+      img.style.height = `${(percentHeight / 100) * baseHeight}px`;
       img.removeAttribute('height');
+    }
+    if (!isNaN(percentWidth) && !isNaN(percentHeight)) {
+      img.style.objectFit = 'contain';
     }
     if (inlineWithText) {
       img.classList.add('has-text-siblings');
@@ -1759,6 +2086,7 @@ export const applyImageStyle = (document: Document) => {
       hr.classList.add('background-img');
     }
   });
+  classifyAndTagStandaloneDiagrams(document, isDarkMode, isFixedLayout);
 };
 
 // The enlarged link hit area positions every link and its ::before box, and
@@ -1883,6 +2211,8 @@ export const applyFixedlayoutStyles = (
   // are to be inverted; inverting or blending it again would darken or flip the
   // theme colors (#6548).
   const isThemedPDF = format === 'PDF' && viewSettings.applyThemeToPDF;
+  const transparentImages = !!viewSettings.transparentImageBackground && format !== 'PDF';
+  if (transparentImages) imgFilters.push(WHITE_TRANSPARENCY_FILTER);
   // hue-rotate flips the hues back, so a blue link stays blue
   if (isDarkMode && invertImgColorInDark && !isThemedPDF) {
     imgFilters.push('invert(100%) hue-rotate(180deg)');
@@ -1921,7 +2251,13 @@ export const applyFixedlayoutStyles = (
     }
     img, canvas {
       ${imgFilter}
-      ${overrideColor && !isThemedPDF ? `mix-blend-mode: ${isDarkMode ? darkMixBlendMode : 'multiply'};` : ''}
+      ${!transparentImages && overrideColor && !isThemedPDF ? `mix-blend-mode: ${isDarkMode ? darkMixBlendMode : 'multiply'};` : ''}
+    }
+    ${
+      transparentImages
+        ? `svg image { ${imgFilter} }
+    img, svg image { mix-blend-mode: normal !important; background-color: transparent !important; }`
+        : ''
     }
     img.singlePage {
       position: relative;

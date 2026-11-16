@@ -10,12 +10,14 @@ import { ABSServer } from './audiobookshelf';
 import type { CustomTranslator, TranslationPrompt } from './translation';
 import type { CustomTTSService } from './customTTS';
 import type { AISettings } from '@/services/ai/types';
+import type { CoverSearchEngine } from '@/services/metadata/coverSearch';
 import type { NotebookTab } from '@/store/notebookStore';
 import type { DictionarySettings, ImportedDictionary } from '@/services/dictionaries/types';
 
 export type ThemeType = 'light' | 'dark' | 'auto';
 export type LibraryViewModeType = 'grid' | 'list';
 export const LibrarySortByType = {
+  Custom: 'custom',
   Title: 'title',
   Author: 'author',
   Updated: 'updated',
@@ -108,6 +110,12 @@ export interface KOSyncSettings {
    * Off by default, matching KOReader.
    */
   sendMetadata?: boolean;
+  /**
+   * Accept a self-signed or mismatched TLS certificate from this server on
+   * native requests. Unset on settings saved before the option existed, which
+   * keep accepting them; see `allowsSelfSignedCert`.
+   */
+  allowSelfSignedCert?: boolean;
 }
 
 export interface BookOrbitSettings {
@@ -135,6 +143,30 @@ export interface BookOrbitSettings {
    * option existed keep the automatic pushes they already had.
    */
   autoSync?: boolean;
+  /**
+   * Accept a self-signed or mismatched TLS certificate from this server on
+   * native requests. Unset on settings saved before the option existed, which
+   * keep accepting them; see `allowsSelfSignedCert`.
+   */
+  allowSelfSignedCert?: boolean;
+}
+
+export interface GrimmorySettings {
+  enabled: boolean;
+  /** Base server origin, e.g. https://books.example.com (no /api path). */
+  serverUrl: string;
+  username: string;
+  /** Kept to sign in again once the server's refresh token runs out. */
+  password: string;
+  strategy: KOSyncStrategy;
+  syncProgress: boolean;
+  /** Highlights, notes and bookmarks. */
+  syncNotes: boolean;
+  syncStats: boolean;
+  syncBookStates: boolean;
+  customHeaders?: Record<string, string>;
+  /** Unset means accepted, as for the other servers; see `allowsSelfSignedCert`. */
+  allowSelfSignedCert?: boolean;
 }
 
 export interface ReadwiseSettings {
@@ -192,6 +224,21 @@ export interface NotionSettings {
   lastSyncedAt: number;
   /** Append a chapter heading block before each highlight (default ON). */
   includeChapterHeading?: boolean;
+  /** Render each note through `customTemplate` instead of the built-in layout. */
+  useCustomTemplate?: boolean;
+  /** Nunjucks template rendering one note as Markdown, converted to Notion blocks. */
+  customTemplate?: string;
+}
+
+/**
+ * Writes each book's highlights into a Markdown note in an Obsidian vault
+ * folder (#7061). Per device: the folder is a local path, so this slice is
+ * not in the synced settings allowlist.
+ */
+export interface ObsidianSettings {
+  enabled: boolean;
+  /** Absolute path of the vault folder the book notes go into. */
+  folder: string;
 }
 
 /**
@@ -361,7 +408,8 @@ export interface ReadestCloudSettings {
  * User-facing sync categories. 'progress' gates the existing book-config
  * (reading progress) sync, 'note' gates annotations, 'book' gates book
  * binaries + metadata, 'dictionary' gates the imported-dictionary replica
- * sync. 'credentials' is a meta-toggle that gates the encrypted-credential
+ * sync. 'book_data' gates a book's synced data files (downloaded read-aloud
+ * audio, later translations). 'credentials' is a meta-toggle that gates the encrypted-credential
  * fields (OPDS username/password, KOSync credentials, Readwise / Hardcover
  * tokens) across whichever replica kinds carry them. Adding a new replica
  * kind extends this union.
@@ -370,6 +418,7 @@ export type SyncCategory =
   | 'book'
   | 'progress'
   | 'note'
+  | 'book_data'
   | 'dictionary'
   | 'font'
   | 'texture'
@@ -379,12 +428,14 @@ export type SyncCategory =
   | 'custom_tts'
   | 'settings'
   | 'credentials'
-  | 'stats';
+  | 'stats'
+  | 'vocabulary';
 
 export const SYNC_CATEGORIES: readonly SyncCategory[] = [
   'book',
   'progress',
   'note',
+  'book_data',
   'dictionary',
   'font',
   'texture',
@@ -394,6 +445,7 @@ export const SYNC_CATEGORIES: readonly SyncCategory[] = [
   'custom_tts',
   'settings',
   'stats',
+  'vocabulary',
   'credentials',
 ] as const;
 
@@ -494,6 +546,12 @@ export interface SystemSettings {
   bookshelves?: BookshelfState;
   libraryViewMode: LibraryViewModeType;
   librarySortBy: LibrarySortByType;
+  /**
+   * Custom order picked in the View menu. Kept out of `librarySortBy`, which
+   * stays a metadata sort: releases before custom order give every shelf with
+   * an unknown sort no books, so a downgrade would open on an empty library.
+   */
+  librarySortCustom?: boolean;
   librarySortAscending: boolean;
   /**
    * Whether the primary sort uses a smart default derived from `libraryGroupBy`.
@@ -545,6 +603,8 @@ export interface SystemSettings {
   customTTSServices?: CustomTTSService[];
   /** Saved sites for the "From Web Browser" import (#5775). Device-local. */
   webSources?: WebSource[];
+  /** Additional image-search engines for the cover editor. Device-local. */
+  coverSearchEngines?: CoverSearchEngine[];
   metadataSeriesCollapsed: boolean;
   metadataOthersCollapsed: boolean;
   metadataDescriptionCollapsed: boolean;
@@ -573,10 +633,12 @@ export interface SystemSettings {
 
   kosync: KOSyncSettings;
   bookorbit: BookOrbitSettings;
+  grimmory: GrimmorySettings;
   readwise: ReadwiseSettings;
   hardcover: HardcoverSettings;
   pagebound: PageboundSettings;
   notion: NotionSettings;
+  obsidian: ObsidianSettings;
   /** Optional by design — see {@link ReadestCloudSettings}. Never defaulted. */
   readestCloud?: ReadestCloudSettings;
   webdav: WebDAVSettings;

@@ -7,6 +7,7 @@
  * way out to the real page. Popups synthesized from a `data-*` attribute have
  * no location in the book and must not offer one.
  */
+import { bookDataStoreHooks } from '@/__tests__/helpers/book-data-store-mock';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, render, screen, fireEvent } from '@testing-library/react';
 import type { ReactNode } from 'react';
@@ -14,15 +15,24 @@ import type { BookDoc } from '@/libs/document';
 import { eventDispatcher } from '@/utils/event';
 
 const BOOK_KEY = 'bookid-0';
+
+type VocabularyMarks = { learning: Map<string, string>; mastered: Set<string> };
+type VocabularyMock = {
+  marks: VocabularyMarks;
+  getLearningAndMastered: () => VocabularyMarks;
+};
 const HREF = 'text/part0012.xhtml#appendix-c';
 
 const hoisted = vi.hoisted(() => ({
-  handlers: [] as EventTarget[],
+  handlers: [] as (EventTarget & { handle: ReturnType<typeof vi.fn> })[],
   onLinkClick: { current: null as ((event: Event) => void) | null },
   goTo: vi.fn(),
   showTransientHighlight: vi.fn(),
   isLinkTargetVisible: vi.fn(),
   applyLinkHitArea: vi.fn(),
+  wordLensEnabled: false,
+  loadGlossIndex: vi.fn().mockResolvedValue(null),
+  vocabulary: { learning: new Map([['spice', 'seasoning']]), mastered: new Set<string>() },
 }));
 
 vi.mock('foliate-js/footnotes.js', () => {
@@ -54,15 +64,30 @@ vi.mock('@/context/EnvContext', () => ({
   useEnv: () => ({ appService: { isMobile: false } }),
 }));
 
+vi.mock('@/services/wordlens/glossPacks', () => ({
+  loadGlossIndex: hoisted.loadGlossIndex,
+}));
+
+vi.mock('@/store/vocabularyStore', async () => {
+  const { create } = await import('zustand');
+  const useVocabularyStore = create<VocabularyMock>()((_set, get) => ({
+    marks: hoisted.vocabulary,
+    getLearningAndMastered: () => get().marks,
+  }));
+  return { useVocabularyStore };
+});
+
 const bookDataState = {
   booksData: { bookid: { config: { booknotes: [] } } },
   getBookData: () => ({ book: { primaryLanguage: 'en' } }),
 };
 vi.mock('@/store/bookDataStore', () => ({
-  useBookDataStore: Object.assign(
-    (selector?: (state: typeof bookDataState) => unknown) =>
-      selector ? selector(bookDataState) : bookDataState,
-    { getState: () => bookDataState },
+  ...bookDataStoreHooks(
+    Object.assign(
+      (selector?: (state: typeof bookDataState) => unknown) =>
+        selector ? selector(bookDataState) : bookDataState,
+      { getState: () => bookDataState },
+    ),
   ),
 }));
 
@@ -74,6 +99,7 @@ vi.mock('@/store/readerStore', () => ({
       defaultFontSize: 22,
       lineHeight: 1.8,
       fontWeight: 300,
+      wordLensEnabled: hoisted.wordLensEnabled,
     }),
   }),
 }));
@@ -241,6 +267,73 @@ describe('FootnotePopup link hit area', () => {
     });
 
     expect(hoisted.applyLinkHitArea).toHaveBeenCalledWith(doc);
+  });
+});
+
+describe('FootnotePopup Word Lens hints', () => {
+  beforeEach(() => {
+    document.body.replaceChildren();
+    hoisted.handlers.length = 0;
+    hoisted.onLinkClick.current = null;
+    hoisted.wordLensEnabled = true;
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+  });
+
+  const setVocabulary = async (marks: VocabularyMarks) => {
+    const { useVocabularyStore } = await import('@/store/vocabularyStore');
+    (useVocabularyStore as unknown as { setState: (s: Partial<VocabularyMock>) => void }).setState({
+      marks,
+    });
+  };
+
+  afterEach(async () => {
+    hoisted.wordLensEnabled = false;
+    vi.unstubAllGlobals();
+    await setVocabulary(hoisted.vocabulary);
+  });
+
+  const loadPopupDoc = async (view: HTMLElement, html: string) => {
+    const doc = document.implementation.createHTMLDocument();
+    doc.body.innerHTML = html;
+    Object.assign((view as unknown as { renderer: object }).renderer, {
+      getContents: () => [{ doc, index: 3 }],
+    });
+    await act(async () => {
+      view.dispatchEvent(new CustomEvent('load', { detail: { doc, index: 3 } }));
+    });
+    return doc;
+  };
+
+  it('renders existing Word Lens hints in the active footnote without downloading a pack', async () => {
+    await renderPopup();
+    const view = await openFootnotePopup();
+    const doc = await loadPopupDoc(view, '<p>Add some spice.</p>');
+    expect(doc.querySelector('.wl-gloss rt')?.textContent).toBe('seasoning');
+    expect(hoisted.loadGlossIndex).toHaveBeenCalledWith(
+      expect.anything(),
+      'en',
+      expect.any(String),
+      expect.objectContaining({ allowDownload: false }),
+    );
+  });
+
+  it('shows a hint saved while the footnote stays open', async () => {
+    await renderPopup();
+    const view = await openFootnotePopup();
+    const doc = await loadPopupDoc(view, '<p>Worth more than gold.</p>');
+    expect(doc.querySelector('.wl-gloss')).toBeNull();
+
+    await act(async () => {
+      await setVocabulary({ learning: new Map([['gold', '黄金']]), mastered: new Set<string>() });
+    });
+
+    expect(doc.querySelector('.wl-gloss rt')?.textContent).toBe('黄金');
   });
 });
 
@@ -487,6 +580,26 @@ describe('FootnotePopup jump to location', () => {
     expect(screen.getByTestId('popup').dataset['open']).toBe('false');
   });
 
+  it('closes when paragraph mode focuses a different paragraph in this book', async () => {
+    const { unmount } = await renderPopup();
+    try {
+      await openFootnotePopup();
+      expect(screen.getByTestId('popup').dataset['open']).toBe('true');
+
+      await act(async () => {
+        await eventDispatcher.dispatch('paragraph-focus', { bookKey: 'another-book' });
+      });
+      expect(screen.getByTestId('popup').dataset['open']).toBe('true');
+
+      await act(async () => {
+        await eventDispatcher.dispatch('paragraph-focus', { bookKey: BOOK_KEY });
+      });
+      expect(screen.getByTestId('popup').dataset['open']).toBe('false');
+    } finally {
+      unmount();
+    }
+  });
+
   // #6390 review: a range-editor preview is dispatched after an await, so it
   // can land once the popup shows another section. It must not draw there.
   it('draws a drag preview only for a note in the section the popup shows', async () => {
@@ -579,6 +692,45 @@ describe('FootnotePopup jump to location', () => {
       await block(null);
 
       expect(screen.getByTestId('popup').dataset['anchorY']).toBe('110');
+    });
+  });
+
+  describe('FootnotePopup follow flag on footnote class links', () => {
+    beforeEach(() => {
+      document.body.replaceChildren();
+      hoisted.handlers.length = 0;
+      hoisted.onLinkClick.current = null;
+    });
+
+    it.each([
+      'footnote-ref',
+      'noteref',
+      'duokan-footnote',
+      'footnote-link',
+      'footnote',
+    ])('sets detail.follow = true for links with class %s', async (cls) => {
+      await renderPopup();
+      const anchor = document.createElement('a');
+      anchor.setAttribute('href', HREF);
+      anchor.classList.add(cls);
+      document.body.appendChild(anchor);
+
+      const event = new CustomEvent('link', {
+        detail: { a: anchor, href: HREF },
+        cancelable: true,
+      });
+
+      await act(async () => {
+        hoisted.onLinkClick.current?.(event);
+      });
+
+      const handler = hoisted.handlers.at(-1)!;
+      expect(handler.handle).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          detail: expect.objectContaining({ follow: true }),
+        }),
+      );
     });
   });
 });

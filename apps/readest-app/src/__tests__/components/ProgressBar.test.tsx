@@ -1,8 +1,10 @@
+// @vitest-environment happy-dom
 import { cleanup, fireEvent, render } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import ProgressBar from '@/app/reader/components/ProgressBar';
 import { DEFAULT_VIEW_CONFIG } from '@/services/constants';
+import { clearChapterScreens, recordChapterScreens } from '@/utils/chapterScreens';
 import type { BookProgress, ViewSettings } from '@/types/book';
 import type { TOCItem } from '@/libs/document';
 
@@ -19,7 +21,7 @@ let currentBookData: {
   bookDoc?: {
     metadata?: Record<string, unknown>;
     toc?: TOCItem[];
-    sections?: { location?: { current: number; next: number; total: number } }[];
+    sections?: { location?: { current: number; next: number; total: number }; size?: number }[];
   };
 } | null;
 let currentRenderer: { page: number; pages: number };
@@ -103,6 +105,7 @@ const renderProgressBar = () =>
 
 afterEach(() => {
   cleanup();
+  clearChapterScreens('book-1');
 });
 
 beforeEach(() => {
@@ -155,6 +158,120 @@ describe('ProgressBar — fixed-layout remaining pages', () => {
     expect(container.querySelector('.progressinfo')?.getAttribute('aria-label')).toContain(
       'pages left in chapter',
     );
+  });
+});
+
+describe('ProgressBar — percent readout', () => {
+  // A location pair of 2/5 reads 60%; the continuous fraction says 45%.
+  const setupPercent = (isFixedLayout: boolean) => {
+    currentViewSettings = {
+      ...baseSettings,
+      progressStyle: 'percentage',
+      showProgressInfo: true,
+    } as ViewSettings;
+    currentProgress = { ...makeProgress(2, 5), fraction: 0.45 } as BookProgress;
+    currentBookData = { isFixedLayout };
+  };
+
+  it('reads the continuous fraction for reflowable books', () => {
+    setupPercent(false);
+    const { container } = renderProgressBar();
+    expect(container.querySelector('.progress-info-label')?.textContent).toBe('45%');
+  });
+
+  it('keeps the page-count percent for fixed-layout books (fraction is byte-weighted)', () => {
+    setupPercent(true);
+    const { container } = renderProgressBar();
+    expect(container.querySelector('.progress-info-label')?.textContent).toBe('60%');
+  });
+});
+
+describe('ProgressBar — calibrated page pair', () => {
+  const setupFraction = (opts?: {
+    fraction?: number;
+    sections?: { size?: number }[];
+    scrolled?: boolean;
+    stablePageNumbers?: boolean;
+  }) => {
+    currentViewSettings = {
+      ...baseSettings,
+      progressStyle: 'fraction',
+      showProgressInfo: true,
+      scrolled: opts?.scrolled ?? false,
+      stablePageNumbers: opts?.stablePageNumbers ?? false,
+    } as ViewSettings;
+    currentProgress = { ...makeProgress(2, 5), fraction: opts?.fraction } as BookProgress;
+    currentBookData = {
+      isFixedLayout: false,
+      bookDoc: opts?.sections ? { sections: opts.sections } : { metadata: {} },
+    };
+  };
+
+  it('keeps the stable byte-grid pair by default', () => {
+    setupFraction({
+      sections: [{ size: 1500 }, { size: 1500 }, { size: 15000 }],
+      stablePageNumbers: DEFAULT_VIEW_CONFIG.stablePageNumbers,
+    });
+    recordChapterScreens('book-1', 2, 10);
+    currentRenderer = { page: 3, pages: 10 };
+
+    const { container } = renderProgressBar();
+
+    expect(container.querySelector('.progress-info-label')?.textContent).toBe('3 / 5');
+  });
+
+  it('advances exactly one page per turn once chapters are measured', () => {
+    // Chapter 2 measures 10 spreads over 15000 bytes -> 1500 bytes/screen, so
+    // the two 1500-byte chapters before it count one page each: 2 + page 3.
+    setupFraction({ sections: [{ size: 1500 }, { size: 1500 }, { size: 15000 }] });
+    recordChapterScreens('book-1', 2, 10);
+    currentRenderer = { page: 3, pages: 10 };
+
+    const { container } = renderProgressBar();
+
+    expect(container.querySelector('.progress-info-label')?.textContent).toBe('6 / 12');
+  });
+
+  it('opens on the byte-grid estimate before any chapter is measured', () => {
+    // 7000 bytes at 1500 bytes/screen -> 4.67 total; base 2 + page 1.
+    setupFraction({ sections: [{ size: 1000 }, { size: 2000 }, { size: 4000 }] });
+    currentRenderer = { page: 1, pages: 3 };
+
+    const { container } = renderProgressBar();
+
+    expect(container.querySelector('.progress-info-label')?.textContent).toBe('4 / 5');
+  });
+
+  it('keeps chunked chapters smooth via the byte-domain fraction', () => {
+    setupFraction({
+      fraction: 0.6,
+      sections: [{ size: 1000 }, { size: 2000 }, { size: 1500000 }],
+    });
+    currentSectionFractions = [0, 0.25, 0.5, 0.7, 0.9, 1];
+    // Chunk-local renderer coordinates (page 9 of chunk pages 12) are ignored.
+    currentRenderer = { page: 9, pages: 12 };
+
+    const { container } = renderProgressBar();
+
+    expect(container.querySelector('.progress-info-label')?.textContent).toBe('503 / 1002');
+  });
+
+  it('falls back to the book-level pair in scrolled mode', () => {
+    setupFraction({ scrolled: true });
+    currentRenderer = { page: 1, pages: 4 };
+
+    const { container } = renderProgressBar();
+
+    expect(container.querySelector('.progress-info-label')?.textContent).toBe('3 / 5');
+  });
+
+  it('keeps real page pairs for fixed-layout books', () => {
+    setupFraction();
+    currentBookData = { isFixedLayout: true, bookDoc: { metadata: {} } };
+
+    const { container } = renderProgressBar();
+
+    expect(container.querySelector('.progress-info-label')?.textContent).toBe('3 / 5');
   });
 });
 
@@ -339,6 +456,15 @@ describe('ProgressBar — footer overlay pointer contract', () => {
     }
   });
 
+  it('drops the pill backdrops in scrolled mode with Solid Footer on (#6793)', () => {
+    // The band is reserved, so the info sits on it instead of over the text.
+    readerSettings({ scrolled: true, showRemainingPages: true, solidScrolledFooter: true });
+
+    const { container } = renderProgressBar();
+
+    expect(container.querySelector('.progress-pill')).toBeNull();
+  });
+
   it('does not add pill backdrops in paginated mode (band holds the info)', () => {
     readerSettings({ scrolled: false, showRemainingPages: true });
 
@@ -378,11 +504,13 @@ describe('ProgressBar — tap to toggle visibility (#5293)', () => {
 
     fireEvent.click(strip);
     expect(strip.classList.contains('opacity-0')).toBe(true);
+    expect(strip.classList.contains('transition-opacity')).toBe(false);
     // The strip stays tappable while hidden so the same tap brings it back.
     expect(strip.classList.contains('pointer-events-auto')).toBe(true);
 
     fireEvent.click(strip);
     expect(strip.classList.contains('opacity-0')).toBe(false);
+    expect(strip.classList.contains('transition-opacity')).toBe(true);
   });
 
   it('never writes settings from the tap (visibility is ephemeral)', () => {
@@ -431,6 +559,15 @@ describe('ProgressBar — tap to toggle visibility (#5293)', () => {
 
   it('makes the whole strip tappable in scrolled mode when the sticky bar reserves the band', () => {
     readerSettings({ scrolled: true, showStickyProgressBar: true });
+
+    const { container } = renderProgressBar();
+
+    const strip = container.querySelector('.progress-strip') as HTMLElement;
+    expect(strip.classList.contains('pointer-events-auto')).toBe(true);
+  });
+
+  it('makes the whole strip tappable in scrolled mode with Solid Footer on (#6793)', () => {
+    readerSettings({ scrolled: true, showRemainingPages: true, solidScrolledFooter: true });
 
     const { container } = renderProgressBar();
 

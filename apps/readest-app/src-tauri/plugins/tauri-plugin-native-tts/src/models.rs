@@ -38,6 +38,12 @@ pub struct SpeakResponse {
     pub utterance_id: String,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopArgs {
+    pub utterance_id: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetRateArgs {
@@ -140,6 +146,14 @@ pub struct PlayoutControlRequest {
     pub path: Option<String>,
     // Seek target for actions "load" and "seek", in milliseconds.
     pub position_ms: Option<f64>,
+    // Byte window [start, end) of `path` to play as the whole track: a stored
+    // audio entry inside the book's zip. iOS also needs its MIME type, since
+    // the file's own extension names the book.
+    pub start: Option<u64>,
+    pub end: Option<u64>,
+    pub content_type: Option<String>,
+    // Linux reads compressed narration directly from this ZIP entry.
+    pub entry: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -155,4 +169,7 @@ pub struct PlayoutPositionResponse {
     pub index: i32,
     pub position_ms: f64,
     pub playing: bool,
+    // Android: the item the playlist ended on, once nothing is current.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_index: Option<i32>,
 }

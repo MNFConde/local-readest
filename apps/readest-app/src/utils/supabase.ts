@@ -15,11 +15,30 @@ const READEST_CLOUD_HOSTS = [
   'auth.readest.com',
 ];
 
+// Some ISPs block *.supabase.co (#6416), so Readest Cloud sends password sign-in
+// and the calls that keep such a session alive through a Worker on readest.com
+// (workers/auth-proxy). OAuth and email links stay on the Supabase host: their
+// callbacks land there, and a proxy can't change that.
+const AUTH_PROXY_URL = 'https://auth-cf.readest.com';
+
+const isProxiedAuthRequest = ({ pathname, searchParams }: URL) =>
+  pathname === '/auth/v1/logout' ||
+  (pathname === '/auth/v1/token' &&
+    ['password', 'refresh_token'].includes(searchParams.get('grant_type') ?? ''));
+
+const proxyAuthFetch: typeof fetch = (input, init) => {
+  const url = new URL(input instanceof Request ? input.url : input);
+  return isProxiedAuthRequest(url)
+    ? fetch(`${AUTH_PROXY_URL}${url.pathname}${url.search}`, init)
+    : fetch(input, init);
+};
+
 export const supabase: SupabaseClient | null = createSupabaseClientSafe();
 
-// Avoid calling createClient with empty url/key (which throws at module load
-// when the Supabase env vars are absent). The official path requires those vars
-// at runtime; if missing, callsites using `supabase!` will fail loudly.
+// FORK(selfhost): avoid calling createClient with empty url/key (which throws
+// at module load when the Supabase env vars are absent). The official path
+// requires those vars at runtime; if missing, callsites using `supabase!` will
+// fail loudly.
 function createSupabaseClientSafe(): SupabaseClient | null {
   if (SELFHOSTED) return null;
   if (!supabaseUrl || !supabaseAnonKey) return null;
@@ -27,7 +46,7 @@ function createSupabaseClientSafe(): SupabaseClient | null {
     supabaseUrl,
     supabaseAnonKey,
     READEST_CLOUD_HOSTS.includes(new URL(supabaseUrl).hostname)
-      ? { auth: { storageKey: 'sb-readest-auth-token' } }
+      ? { auth: { storageKey: 'sb-readest-auth-token' }, global: { fetch: proxyAuthFetch } }
       : undefined,
   );
 }

@@ -323,16 +323,21 @@ export function handleSelfhostedAuthCallback({
  */
 export async function refreshSelfhostedSession(
   login: (token: string, user: SelfhostedUser) => void,
-): Promise<void> {
+): Promise<boolean> {
   const storedToken = localStorage.getItem('token');
-  if (storedToken && !isTokenExpired(storedToken)) return;
+  if (storedToken && !isTokenExpired(storedToken)) return true;
   const credentials = getSavedCredentials();
-  if (!credentials) return;
+  if (!credentials) return false;
   try {
     const { access_token } = await selfhostedLogin(credentials.email, credentials.password);
     const user = jwtToUser(access_token);
-    if (user) login(access_token, user);
+    if (user) {
+      login(access_token, user);
+      return true;
+    }
+    return false;
   } catch {
     // Keep the stale token; callers fall back to the login screen on 401.
+    return false;
   }
 }

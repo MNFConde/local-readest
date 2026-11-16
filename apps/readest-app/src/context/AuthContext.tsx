@@ -25,7 +25,7 @@ interface AuthContextType {
   user: User | SelfhostedUser | null;
   login: (token: string, user: User | SelfhostedUser) => void;
   logout: () => void;
-  refresh: () => void;
+  refresh: () => Promise<boolean>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -127,8 +127,11 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     // SELFHOSTED (fork): silent re-login with persisted credentials.
     if (!supabase) return refreshSelfhostedSession(login);
     try {
-      await supabase.auth.refreshSession();
-    } catch {}
+      const { data, error } = await supabase.auth.refreshSession();
+      return !error && !!data.session;
+    } catch {
+      return false;
+    }
   }, [login]);
 
   const value = useMemo(

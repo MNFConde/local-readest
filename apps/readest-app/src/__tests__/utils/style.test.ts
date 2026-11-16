@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, vi } from 'vitest';
 
 vi.mock('@/utils/misc', async (importOriginal) => {
@@ -8,7 +9,7 @@ vi.mock('@/utils/misc', async (importOriginal) => {
   };
 });
 
-import { transformStylesheet, getFootnoteStyles } from '@/utils/style';
+import { transformStylesheet, transformInlineFonts, getFootnoteStyles } from '@/utils/style';
 
 describe('transformStylesheet', () => {
   const VW = 1000;
@@ -198,6 +199,69 @@ describe('transformStylesheet', () => {
     });
   });
 
+  describe('font shorthand publisher fonts (#7276)', () => {
+    it('wraps the family list after the size and line-height', () => {
+      expect(
+        transformInlineFonts('font: italic bold 1.2em / 1.5 "Futura", sans-serif !important'),
+      ).toBe(
+        'font: italic bold 1.2em / 1.5 var(--book-sans-serif, "Futura", sans-serif) !important',
+      );
+      expect(
+        transformStylesheet('p { font: small-caps 700 12px Palatino, serif; }', VW, VH, VERTICAL),
+      ).toContain('font: small-caps 700 12px var(--book-serif, Palatino, serif);');
+    });
+
+    it('leaves a shorthand without a size or a generic alone', () => {
+      expect(transformInlineFonts('font: caption')).toBe('font: caption');
+      expect(transformInlineFonts('font: 1em Papyrus, fantasy')).toBe('font: 1em Papyrus, fantasy');
+    });
+
+    // A quadratic match took over 2 s on 20,000 spaces after `font:`.
+    it('stays linear on long runs of whitespace', () => {
+      const css = `p { font:${' '.repeat(50_000)}}`;
+      const start = performance.now();
+      transformInlineFonts(css);
+      expect(performance.now() - start).toBeLessThan(200);
+    });
+  });
+
+  describe('publisher font list parsing (#7276)', () => {
+    it.each([
+      '"Decorative, serif, ornaments", fantasy',
+      '"A /* serif, */ B", fantasy',
+      String.raw`"A \"quoted, serif\" name", fantasy`,
+      String.raw`Publisher\,serif, fantasy`,
+      'var(--publisher, serif), fantasy',
+    ])('preserves quoted, escaped and functional names: %s', (families) => {
+      const css = `p { font-family: ${families}; }`;
+      expect(transformStylesheet(css, VW, VH, VERTICAL)).toBe(css);
+      expect(transformInlineFonts(`font-family: ${families}`)).toBe(`font-family: ${families}`);
+      expect(transformInlineFonts(`font: 16px ${families}`)).toBe(`font: 16px ${families}`);
+    });
+
+    it('recognizes generics surrounded by comments without altering quoted comment text', () => {
+      const families = '"A /* serif, */ B", /* fallback */ serif /* end */';
+      expect(transformStylesheet(`p { font-family: ${families}; }`, VW, VH, VERTICAL)).toContain(
+        'var(--book-serif, "A /* serif, */ B", /* fallback */ var(--serif, serif) /* end */)',
+      );
+      for (const prefix of ['font-family:', 'font: 16px']) {
+        expect(transformInlineFonts(`${prefix} ${families}`)).toBe(
+          `${prefix} var(--book-serif, ${families})`,
+        );
+      }
+    });
+
+    it('nests every eligible category in list order', () => {
+      const families = 'Publisher, serif, monospace';
+      expect(transformInlineFonts(`font-family: ${families}`)).toBe(
+        `font-family: var(--book-serif, var(--book-monospace, ${families}))`,
+      );
+      expect(transformInlineFonts(`font: 16px ${families}`)).toBe(
+        `font: 16px var(--book-serif, var(--book-monospace, ${families}))`,
+      );
+    });
+  });
+
   describe('font-family generic replacements', () => {
     it('replaces serif with var(--serif, serif)', () => {
       const css = '.text { font-family: serif; }';
@@ -220,14 +284,14 @@ describe('transformStylesheet', () => {
     it('keeps a trailing !important on the declaration', () => {
       const css = '.text { font-family: serif !important; }';
       const result = transformStylesheet(css, VW, VH, VERTICAL);
-      expect(result).toContain('font-family: var(--serif, serif) !important');
+      expect(result).toContain('font-family: var(--book-serif, var(--serif, serif)) !important');
     });
 
     it('replaces every generic in a list, not just the first', () => {
       const css = '.text { font-family: Helvetica, sans-serif, monospace; }';
       const result = transformStylesheet(css, VW, VH, VERTICAL);
       expect(result).toContain(
-        'font-family: Helvetica, var(--sans-serif, sans-serif), var(--monospace, monospace)',
+        'font-family: var(--book-sans-serif, var(--book-monospace, Helvetica, var(--sans-serif, sans-serif), var(--monospace, monospace)))',
       );
     });
 
@@ -244,13 +308,17 @@ describe('transformStylesheet', () => {
         'body { font-family: Source Han Serif CN, serif; }';
       const result = transformStylesheet(css, VW, VH, VERTICAL);
       expect(result).toContain('@font-face { font-family: Source Han Serif CN;');
-      expect(result).toContain('font-family: Source Han Serif CN, var(--serif, serif)');
+      expect(result).toContain(
+        'font-family: var(--book-serif, Source Han Serif CN, var(--serif, serif))',
+      );
     });
 
     it('leaves a quoted font name containing "Serif" untouched', () => {
       const css = 'p { font-family: "Comic Serif Face", serif; }';
       const result = transformStylesheet(css, VW, VH, VERTICAL);
-      expect(result).toContain('font-family: "Comic Serif Face", var(--serif, serif)');
+      expect(result).toContain(
+        'font-family: var(--book-serif, "Comic Serif Face", var(--serif, serif))',
+      );
     });
 
     it('leaves font names containing sans-serif/monospace words untouched', () => {
@@ -318,6 +386,22 @@ describe('transformStylesheet', () => {
       const css = '.text { color: rgb(0, 0, 0); }';
       const result = transformStylesheet(css, VW, VH, VERTICAL);
       expect(result).toContain('color: var(--theme-fg-color)');
+    });
+
+    it('replaces black written with an alpha digit', () => {
+      for (const black of ['#000f', '#000000ff']) {
+        const result = transformStylesheet(`.text { color: ${black}; }`, VW, VH, VERTICAL);
+        expect(result).toContain('color: var(--theme-fg-color);');
+      }
+    });
+
+    // `#000` matched the start of `#0000FF`, leaving `var(--theme-fg-color)0FF`,
+    // which is invalid when computed, so the link fell back to the text color (#6858)
+    it('keeps a color that only starts like black', () => {
+      for (const color of ['#0000FF', '#000080', '#0001', '#00000080']) {
+        const result = transformStylesheet(`a { color: ${color}; }`, VW, VH, VERTICAL);
+        expect(result).toContain(`color: ${color};`);
+      }
     });
   });
 
@@ -629,31 +713,19 @@ describe('transformStylesheet', () => {
   // The paginator sizes the section iframe to the whole multi-column strip, so
   // `(orientation: ...)` inside a section describes the strip, not a page — and
   // the strip is derived from the content, so the query and the page count feed
-  // each other and the layout never settles (#6038).
+  // each other and the layout never settles (#6038). The reading area can turn
+  // while the book is open, so applyOrientationMedia resolves the feature on the
+  // parsed sheet (style-orientation.browser.test.ts); the text pass leaves it.
   describe('orientation media queries', () => {
     const LANDSCAPE_CSS = '@media screen and (orientation: landscape) { div { column-count: 2; } }';
-    const PORTRAIT_CSS = '@media screen and (orientation:portrait) { div { column-count: 2; } }';
 
-    it('keeps a landscape block when the reader viewport is landscape', () => {
-      const result = transformStylesheet(LANDSCAPE_CSS, 1000, 800, VERTICAL);
-      expect(result).toContain('@media screen and (min-width: 0px)');
-      expect(result).not.toContain('orientation');
-    });
-
-    it('drops a landscape block when the reader viewport is portrait', () => {
-      const result = transformStylesheet(LANDSCAPE_CSS, 800, 1000, VERTICAL);
-      expect(result).toContain('@media screen and (min-width: 999999px)');
-      expect(result).not.toContain('orientation');
-    });
-
-    it('keeps a portrait block when the reader viewport is portrait', () => {
-      const result = transformStylesheet(PORTRAIT_CSS, 800, 1000, VERTICAL);
-      expect(result).toContain('@media screen and (min-width: 0px)');
-    });
-
-    it('drops a portrait block when the reader viewport is landscape', () => {
-      const result = transformStylesheet(PORTRAIT_CSS, 1000, 800, VERTICAL);
-      expect(result).toContain('@media screen and (min-width: 999999px)');
+    it('leaves the feature for the reader to resolve, whatever the open-book viewport', () => {
+      expect(transformStylesheet(LANDSCAPE_CSS, 1000, 800, VERTICAL)).toContain(
+        '@media screen and (orientation: landscape)',
+      );
+      expect(transformStylesheet(LANDSCAPE_CSS, 800, 1000, VERTICAL)).toContain(
+        '@media screen and (orientation: landscape)',
+      );
     });
 
     it('leaves the rest of the query and its declarations intact', () => {

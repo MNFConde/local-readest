@@ -2,6 +2,7 @@ import type { AppService } from '@/types/system';
 import type { DatabaseService, DatabaseRow } from '@/types/database';
 import { DEFAULT_STATS_TRACKING_CONFIG } from '@/types/statistics';
 import type { PageStatEvent, StatBook } from '@/types/statistics';
+import type { BookQuarterHourDuration } from './readingStats';
 
 interface BookRow extends DatabaseRow {
   id: number;
@@ -14,7 +15,7 @@ interface BookRow extends DatabaseRow {
   pages: number;
 }
 
-type CursorKey = 'push' | 'pull' | 'bookorbit-push';
+type CursorKey = 'push' | 'pull' | 'bookorbit-push' | `grimmory-push:${string}`;
 
 // Readest caps one page visit at this, so a longer event spans several pages
 // (a CrossPoint session recorded in whole percents) and says nothing about pace.
@@ -196,6 +197,43 @@ export class StatisticsDb {
         durations.length % 2 ? durations[mid]! : (durations[mid - 1]! + durations[mid]!) / 2;
     }
     return medians;
+  }
+
+  /**
+   * Seconds read in each quarter hour (`start_time / 900`). Every UTC offset is
+   * a multiple of 15 minutes, so callers can fold these into local days in JS
+   * instead of trusting SQL `localtime` to know the host's time zone.
+   */
+  async getQuarterHourDurations(): Promise<{ quarter: number; seconds: number }[]> {
+    return this.db.select<{ quarter: number; seconds: number }>(
+      `SELECT start_time / 900 AS quarter, SUM(duration) AS seconds
+       FROM page_stat_data GROUP BY quarter ORDER BY quarter`,
+    );
+  }
+
+  /** Bounded month query shared by native Turso and browser WASM databases. */
+  async getBookQuarterHourDurations(
+    startTime: number,
+    endTime: number,
+  ): Promise<BookQuarterHourDuration[]> {
+    return this.db.select<BookQuarterHourDuration>(
+      `SELECT b.md5 AS bookMd5, b.title, b.authors,
+              p.start_time / 900 AS quarter, SUM(p.duration) AS seconds
+       FROM page_stat_data p JOIN book b ON b.id = p.id_book
+       WHERE p.start_time >= ? AND p.start_time < ? AND p.duration > 0
+       GROUP BY b.md5, b.title, b.authors, quarter ORDER BY quarter, b.md5`,
+      [startTime, endTime],
+    );
+  }
+
+  async getReadingTotals(): Promise<{ seconds: number; books: number; pages: number }> {
+    const rows = await this.db.select<{ seconds: number; books: number; pages: number }>(
+      `SELECT COALESCE(SUM(duration), 0) AS seconds,
+              COUNT(DISTINCT id_book) AS books,
+              COUNT(DISTINCT id_book || '-' || page) AS pages
+       FROM page_stat_data`,
+    );
+    return rows[0] ?? { seconds: 0, books: 0, pages: 0 };
   }
 
   async getBookByMd5(md5: string): Promise<BookRow | null> {
