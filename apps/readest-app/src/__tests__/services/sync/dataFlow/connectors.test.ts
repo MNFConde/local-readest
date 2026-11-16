@@ -14,7 +14,13 @@ import { readFlowState } from '@/services/sync/dataFlow/log';
 import { fetchWithAuth } from '@/utils/fetch';
 
 vi.mock('@tauri-apps/plugin-http', () => ({ fetch: vi.fn() }));
-vi.mock('@/utils/fetch', () => ({ fetchWithAuth: vi.fn() }));
+vi.mock('@/utils/fetch', () => ({
+  fetchWithAuth: vi.fn(),
+  // FORK(selfhost): fork's sync.ts resolves fetchWithTimeout at call time
+  // (SELFHOSTED ? selfhostedFetchWithTimeout : fetchWithTimeout), so the mock
+  // of this module must provide it too.
+  fetchWithTimeout: vi.fn(),
+}));
 vi.mock('@/services/environment', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/environment')>()),
   isTauriAppPlatform: () => h.tauri,
