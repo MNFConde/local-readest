@@ -18,7 +18,11 @@ const session = {
 const loadClient = async (url: string) => {
   vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', url);
   vi.stubEnv('NEXT_PUBLIC_SUPABASE_ANON_KEY', 'anon-key');
+  // FORK(selfhost): the fork's client is SupabaseClient | null (null under the
+  // self-hosted flag) — keep the flag off and assert creation for these tests.
+  vi.stubEnv('NEXT_PUBLIC_SELFHOSTED', '');
   const { supabase } = await import('@/utils/supabase');
+  if (!supabase) throw new Error('supabase client was not created');
   return supabase;
 };
 

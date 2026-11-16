@@ -16,7 +16,7 @@ import { jwtToUser } from '@/services/selfhostedAuth';
 // re-read, so sync paths consult `isShelfScopeCurrent` before pushing or
 // merging — otherwise the previous scope's books ride into the new account
 // (the store still holds them at the instant the user flips).
-let shelfScope: string | null | undefined = undefined;
+let shelfScope: string | null | undefined;
 
 export const setShelfScope = (userId: string | null | undefined) => {
   shelfScope = userId ?? null;
