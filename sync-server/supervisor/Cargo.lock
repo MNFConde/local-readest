@@ -1144,7 +1144,7 @@ dependencies = [
 
 [[package]]
 name = "readest-supervisor"
-version = "0.12.16"
+version = "0.12.20"
 dependencies = [
  "anyhow",
  "crossterm",
