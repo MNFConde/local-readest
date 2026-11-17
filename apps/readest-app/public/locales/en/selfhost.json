@@ -119,5 +119,21 @@
   "Imported {{books}} book(s), linked {{files}} file(s).": "Imported {{books}} book(s), linked {{files}} file(s).",
   "Import failed": "Import failed",
   "Cannot reach the sync server": "Cannot reach the sync server",
-  "Not signed in": "Not signed in"
+  "Not signed in": "Not signed in",
+  "Push a book": "Push a book",
+  "Recipient account": "Recipient account",
+  "Pick a book": "Pick a book",
+  "Message (optional)": "Message (optional)",
+  "Push": "Push",
+  "Pushing…": "Pushing…",
+  "Pushed to {{user}}": "Pushed to {{user}}",
+  "Push failed": "Push failed",
+  "No uploaded books to push": "No uploaded books to push (upload one first)",
+  "Recommended inbox": "Recommended inbox",
+  "No pending recommendations": "No pending recommendations",
+  "From {{user}}": "From {{user}}",
+  "Accept": "Accept",
+  "Decline": "Decline",
+  "Working…": "Working…",
+  "Accepted, linked {{files}} file(s).": "Accepted, linked {{files}} file(s)."
 }

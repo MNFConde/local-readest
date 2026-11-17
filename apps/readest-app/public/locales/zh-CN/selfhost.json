@@ -119,5 +119,21 @@
   "Imported {{books}} book(s), linked {{files}} file(s).": "已导入 {{books}} 本书，链接 {{files}} 个文件。",
   "Import failed": "导入失败",
   "Cannot reach the sync server": "无法连接同步服务器",
-  "Not signed in": "未登录"
+  "Not signed in": "未登录",
+  "Push a book": "推送书籍",
+  "Recipient account": "对方账号",
+  "Pick a book": "选择一本书",
+  "Message (optional)": "附言（可选）",
+  "Push": "推送",
+  "Pushing…": "正在推送…",
+  "Pushed to {{user}}": "已推送给 {{user}}",
+  "Push failed": "推送失败",
+  "No uploaded books to push": "没有可推送的书（请先上传）",
+  "Recommended inbox": "推荐收件箱",
+  "No pending recommendations": "暂无待收推荐",
+  "From {{user}}": "来自 {{user}}",
+  "Accept": "接受",
+  "Decline": "谢绝",
+  "Working…": "处理中…",
+  "Accepted, linked {{files}} file(s).": "已接受，链接 {{files}} 个文件。"
 }

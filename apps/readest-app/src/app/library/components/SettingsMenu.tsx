@@ -41,6 +41,9 @@ import MenuItem from '@/components/MenuItem';
 import AdminConsoleMenuItem from '@/admin/AdminConsoleMenuItem';
 // SELFHOSTED (fork): per-user archive export/import entry (⑫).
 import SelfhostArchiveMenuItem from './SelfhostArchiveMenuItem';
+// SELFHOSTED (fork): user-to-user book push + recommended inbox (⑬).
+import SelfhostPushMenuItem from './SelfhostPushMenuItem';
+import SelfhostInboxMenuItem from './SelfhostInboxMenuItem';
 import Quota from '@/components/Quota';
 import Menu from '@/components/Menu';
 import { type AppLockDialogMode, useAppLockStore } from '@/store/appLockStore';
@@ -422,6 +425,8 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({ onPullLibrary, setIsDropdow
       {/* Self-hosted only (renders null otherwise): admin-role entry into /admin. */}
       <AdminConsoleMenuItem onNavigated={() => setIsDropdownOpen?.(false)} />
       <SelfhostArchiveMenuItem onNavigated={() => setIsDropdownOpen?.(false)} />
+      <SelfhostPushMenuItem onNavigated={() => setIsDropdownOpen?.(false)} />
+      <SelfhostInboxMenuItem onNavigated={() => setIsDropdownOpen?.(false)} />
       <hr aria-hidden='true' className='border-base-200 my-1' />
       <MenuItem label={_('Advanced Settings')}>
         <ul className='ms-0 flex flex-col ps-0 before:hidden'>
