@@ -29,6 +29,10 @@ cargo run --release
 
 每个账号可把自己的全部数据（书目+阅读记录+可选书文件）打包成一个 tar，再导入任意账号（本机或另一台服务器）：`GET /api/archive/export?scope=full|metadata` 流式导出，`POST /api/archive/import` 合并式导入（LWW，永不覆盖对方更新数据；重复导入幂等）。客户端入口=设置菜单「存档传输」；blob 走内容寻址去重，同服务器重复内容零新增字节。契约 `docs/selfhosted/sync-protocol.md` §6.8。
 
+## 用户间推书（待办⑬）
+
+同一服务器上的账号可以互相推荐书籍：`POST /api/pushes`（只推**已上传**的书，创建时快照书目元数据，不含笔记进度）→ 对方 `GET /api/pushes/inbox` 看到待收列表 → `accept`（文件 file→file 硬链接进收件方书库，去重零新增字节；快照行走 LWW，永不覆盖收件方更新的数据）或 `decline`（什么都不落地）。客户端入口=设置菜单「推送书籍」/「推荐收件箱」。契约 `docs/selfhosted/sync-protocol.md` §6.9。
+
 ## 账户管理（T5 起）
 
 登录凭据为「账号（邮箱）+ 密码」；历史上生成的登录码原样当作密码使用，无需迁移。密码允许为空 = 免密登录（知道邮箱即可登入），服务端启动时会对这类账号打警告。

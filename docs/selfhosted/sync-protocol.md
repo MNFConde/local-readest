@@ -274,6 +274,29 @@ blobs/<sha256>   # 仅 scope=full：去重后的书文件内容（一 hash 一�
 
 客户端入口：设置菜单「存档传输」（fork 自有组件，`services/selfhostArchive.ts`）；导出走 fetch→blob→anchor 保存，文件名取 `Content-Disposition`（`readest-archive-<账号>-<时间戳>.tar`）。
 
+### 6.9 用户间推书 /api/pushes/*（待办⑬，普通用户面）
+
+**同服务器内**两个账号之间的书籍推荐：发起方选一本自己**已上传**的书（文件 + 书目元数据快照，**不含笔记与进度**）推给收件方；收件方在待收列表里接受或谢绝。鉴权 = 普通 Bearer JWT（非 admin）。只面向真人账号；限定同一服务器（跨服务器分享列远期，见 ROADMAP ⑪-P2 注）。`pushes` 表（`from_uid/to_uid/book_hash/message/payload_json/status/created_at/decided_at`）在 SCHEMA 中自动建表，管理备份（§6.4 整库 VACUUM 快照）自动覆盖。
+
+| 端点 | 说明 |
+|---|---|
+| `POST /api/pushes` | body `{to, bookHash, message?}`（message ≤500 字）；`to` 按账号名精确匹配（同 login/admin 口径）；成功返回 `{pushed:true, id, to, bookHash, createdAt, title}` |
+| `GET /api/pushes/inbox` | 调用者（收件方）的 pending 列表，`{items:[{id,from,bookHash,title,author,message,createdAt}]}`，新到旧排；客户端徽标直接数它，无独立计数端点 |
+| `POST /api/pushes/{id}/accept` | 接收入库，返回 `{accepted:true, filesLinked, filesSkipped}` |
+| `POST /api/pushes/{id}/decline` | 谢绝，返回 `{declined:id}`；发起方数据零接触 |
+
+要点：
+
+- **创建校验**：收件人不存在 404 / 已停用或推给自己 400 / 无 books 行或文件未上传 404（文件校验走 `…/Books/<hash>/` 前缀匹配，**文件必须已在服务器上**）/ 同 (发起,收件,书) 已有 pending 409（收件箱不是重试队列，决定后可再推）。
+- **快照语义（类 git）**：`payload_json` 在创建时快照发起方的 books 行（§6.8 records.json `books[]` 同形状）——之后发起方改元数据/删书都不影响这份要约的内容；接受时按快照入库。快照书若带 `deleted_at` 直接拒推。
+- **接受 = 直链 + LWW**：把发起方 `files/<from>/…/Books/<hash>/` 下的文件**file→file 直接 hard_link** 进收件方同名相对路径（skip-if-exists，幂等）——不经 blobs 中转也能保住 blob 活性与 §6.1 GC 语义（同 inode 引用计数），**去重零新增字节**；快照行改键后走常规 `upsert_book`（**永不覆盖收件方更新的行**），并重盖 `synced_at`（同 §6.8，保已有拉取游标可见）；library feature 下对每个成功链接的 key 做 best-effort `register_upload`。
+- **失败语义**：配额超限（按源文件实际字节 + 收件方当前用量预检，超 → 413 `QUOTA_EXCEEDED`）或发起方文件已被删（409 `CONFLICT`）都使推送**保持 pending**，收件方可腾空间重试或改谢绝；状态翻转在 db 锁内以 `AND status='pending'` 守卫，并发双 accept 只成功一次（输家回滚刚建的链接）。
+- **收件人限定**：accept/decline 只认 `to_uid`==调用者，他人视角 404（不泄露要约存在）；已决定的推送再 accept/decline → 409。
+- **级联**：管理员删除账号时 `DELETE FROM pushes WHERE from_uid=? OR to_uid=?`（两侧都清）；OPDS 共享书城（`LIBRARY_SHARED`）行为不受影响。
+- 错误体统一 `{error, code}`（`VALIDATION`/`NOT_FOUND`/`CONFLICT`/`QUOTA_EXCEEDED`/`SERVER`）。
+
+客户端入口：设置菜单「推送书籍」（fork 自有组件，`services/selfhostPush.ts`；书列表只列 `uploadedAt` 的书）与「推荐收件箱」（挂载/开框/决策后各拉一次，无轮询循环，徽标显示未领数）。
+
 ## 7. 服务端配置（本项目 env 集）
 
 | env | 缺省 | 说明 |
