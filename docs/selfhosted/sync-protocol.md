@@ -242,6 +242,38 @@ Edge TTS 依赖微软免费接口（websocket 协议）；Rust 实现可用等�
 
 语义：`books.synced` = 各账号在读书目条目数（`books` 表未删除行）；`books.catalog` / `works` = 共享目录行数与作品数。`storage.files_bytes` 按每账号副本**全尺寸**累计（硬链接也计全尺寸，与配额口径一致）；`blobs_bytes` / `blobs_count` = 内容寻址 blob 库实际占用；**`dedup_saved_bytes` = `files_bytes` − `blobs_bytes`**，即去重省下的磁盘；`db_bytes` = SQLite 主库 + WAL/SHM 旁路文件。`server.version` = sync-server crate 版本，`uptime_secs` = 进程运行时长。
 
+### 6.8 用户存档导出/导入 /api/archive/*（待办⑫，普通用户面）
+
+把**一个账号的全部数据**（七张 per-user 表 + 书文件 blob）打包成一个可携带的 tar，可导入**任意账号**（本机或另一台服务器）。用途：自助备份/迁移（含 ⑪-P1 设备号空档案的手动迁移）、跨服务器搬家、仅记录同步。鉴权 = 普通 Bearer JWT（与 §2/§4 同源，非 admin）；导出导入共用一个互斥位，并发请求 409。
+
+| 端点 | 说明 |
+|---|---|
+| `GET /api/archive/export?scope=full\|metadata` | 流式返回 `application/x-tar`（分块流，不整驻内存） |
+| `POST /api/archive/import` | body = 原始 tar（`application/x-tar`；受 §7 `MAX_BODY_BYTES` 上限，超大书库走 `scope=metadata` 后由文件同步补齐书文件） |
+
+tar 布局（成员固定三个或两个）：
+
+```
+manifest.json    # {format:"readest-archive", version:1, scope, exportedAt,
+                 #  serverVersion, counts{books,notes,configs,statBooks,
+                 #  statPages,replicas,replicaKeys,files}, files:[{hash,path,bytes}]}
+records.json     # {books,notes,configs,statBooks,statPages,replicas,replicaKeys}
+                 #  行为各表原始 snake_case 列；notes/configs 只存 data JSON
+blobs/<sha256>   # 仅 scope=full：去重后的书文件内容（一 hash 一份）
+```
+
+要点：
+
+- **hash 口径**：manifest `files[].hash` 与 `blobs/` 文件名 = 内容的 **sha256**（服务端内容寻址口径）；客户端书目 `hash`（`Books/<hash>/` 目录名，partialMD5）是另一个摘要，只出现在 records 里——两者不可混用。
+- **导入语义 = LWW 合并，永不覆盖更新数据**：所有行改写 `user_id` 后走 §2/§4 的常规 upsert 路径，旧行不顶新行；重复导入幂等。books 行导入后**重盖 `synced_at`**（服务端接收时钟，不参与 LWW）使已有拉取游标的客户端也能看到。
+- **blob 完整性**：导入时边流式写盘边算 sha256，与文件名不符的条目直接跳过（计入 `blobsSkipped`）；`blobs/` 只写不存在的条目（write-if-absent，绝不截断共享硬链接体）。同服务器重复内容自动去重（`blobsDeduped`，零新增字节）。
+- **metadata 档**：只含 manifest+records；导入后条目立即可见，blob 已在服务器上（他人有同书）则顺手链接，否则文件链接跳过（`filesSkipped`），书文件可由 OPDS 书城或原账号文件同步补齐。
+- **路径安全**：manifest `files[].path` 经 §4 同款 normalize（拒绝穿越/绝对路径）；非 64 位小写 hex 的 blob 名一律跳过。
+- **配额**：导入按请求体长度预检（与 blob 上传同口径，偏保守——tar 里含记录与已去重 blob）。
+- 响应：导入成功返回计数 summary `{books,notes,configs,statBooks,statPages,replicas,replicaKeys,blobsStored,blobsDeduped,blobsSkipped,filesLinked,filesSkipped}`；坏档（缺 manifest/格式版本不符/非 tar）= 400 `VALIDATION`。
+
+客户端入口：设置菜单「存档传输」（fork 自有组件，`services/selfhostArchive.ts`）；导出走 fetch→blob→anchor 保存，文件名取 `Content-Disposition`（`readest-archive-<账号>-<时间戳>.tar`）。
+
 ## 7. 服务端配置（本项目 env 集）
 
 | env | 缺省 | 说明 |
