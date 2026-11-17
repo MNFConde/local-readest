@@ -75,6 +75,8 @@ pub fn router(state: SharedState) -> Router {
             "/api/storage/blob/{*key}",
             put(crate::storage::blob_put).get(crate::storage::blob_get),
         )
+        .route("/api/archive/export", get(crate::archive::export))
+        .route("/api/archive/import", post(crate::archive::import))
         .route("/api/deepl/translate", post(crate::proxy::deepl_translate))
         .route(
             "/api/yandex-translate",

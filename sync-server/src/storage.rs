@@ -39,7 +39,7 @@ pub fn normalize_key(key: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
-fn key_to_path(root: &Path, key: &str) -> Option<PathBuf> {
+pub(crate) fn key_to_path(root: &Path, key: &str) -> Option<PathBuf> {
     let normalized = normalize_key(key)?;
     let mut path = root.to_path_buf();
     for seg in normalized.split('/') {
@@ -48,10 +48,10 @@ fn key_to_path(root: &Path, key: &str) -> Option<PathBuf> {
     Some(path)
 }
 
-struct FileMeta {
-    key: String,
-    size: i64,
-    updated_at: String,
+pub(crate) struct FileMeta {
+    pub(crate) key: String,
+    pub(crate) size: i64,
+    pub(crate) updated_at: String,
 }
 
 fn walk_dir(dir: &Path, rel: &mut String, out: &mut Vec<FileMeta>) {
@@ -96,7 +96,7 @@ fn walk_dir(dir: &Path, rel: &mut String, out: &mut Vec<FileMeta>) {
     }
 }
 
-fn list_prefix(state: &SharedState, uid: &str) -> Result<Vec<FileMeta>, ApiError> {
+pub(crate) fn list_prefix(state: &SharedState, uid: &str) -> Result<Vec<FileMeta>, ApiError> {
     let root = state.cfg.files_root();
     let base = root.join(uid);
     let mut out = Vec::new();
@@ -113,7 +113,7 @@ fn list_prefix(state: &SharedState, uid: &str) -> Result<Vec<FileMeta>, ApiError
         .collect())
 }
 
-fn compute_usage(state: &SharedState, uid: &str) -> Result<i64, ApiError> {
+pub(crate) fn compute_usage(state: &SharedState, uid: &str) -> Result<i64, ApiError> {
     Ok(list_prefix(state, uid)?.iter().map(|f| f.size).sum())
 }
 

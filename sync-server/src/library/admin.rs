@@ -992,42 +992,6 @@ async fn get_stats(
 // blobs/ and would re-inflate every deduped byte — a restore re-materializes
 // copies from the blob store instead. Contract: sync-protocol.md §6.4.
 
-/// Bridges the synchronous tar builder into the response body: chunks go
-/// through an mpsc channel so the archive never sits in memory whole.
-struct ChannelWriter {
-    tx: tokio::sync::mpsc::Sender<Result<Vec<u8>, std::io::Error>>,
-    buf: Vec<u8>,
-}
-
-const BACKUP_CHUNK_BYTES: usize = 64 * 1024;
-
-impl Write for ChannelWriter {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        self.buf.extend_from_slice(data);
-        if self.buf.len() >= BACKUP_CHUNK_BYTES {
-            self.flush_buf()?;
-        }
-        Ok(data.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.flush_buf()
-    }
-}
-
-impl ChannelWriter {
-    fn flush_buf(&mut self) -> std::io::Result<()> {
-        if self.buf.is_empty() {
-            return Ok(());
-        }
-        let chunk = std::mem::take(&mut self.buf);
-        // Receiver gone = client disconnected: tear the archive down.
-        self.tx
-            .blocking_send(Ok(chunk))
-            .map_err(|_| std::io::Error::other("backup stream closed"))
-    }
-}
-
 /// Resets `AppState::backup_busy` when the streaming task ends — success,
 /// build error, or client disconnect alike.
 struct ResetBackupBusy(SharedState);
@@ -1045,10 +1009,7 @@ fn write_backup_tar(
     jwt_secret: &str,
     tx: tokio::sync::mpsc::Sender<Result<Vec<u8>, std::io::Error>>,
 ) -> std::io::Result<()> {
-    let mut writer = ChannelWriter {
-        tx,
-        buf: Vec::new(),
-    };
+    let mut writer = crate::tarstream::ChannelWriter::new(tx);
     // Inner scope: tar::Builder holds `writer` until its Drop runs.
     {
         let mut builder = tar::Builder::new(&mut writer);

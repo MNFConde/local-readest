@@ -25,6 +25,10 @@ cargo run --release
 - **OPDS 书城** `http://<host>:8080/opds`：客户端「添加目录」填此地址，用户名=邮箱、密码=账号密码。同字节的书全服务端只存一份（内容寻址去重 + 硬链接），任意用户上传即全员可见可下载；`LIBRARY_SHARED=0` 改为仅自己可见。
 - **管理页**：两种入口共存——客户端内置管理页（admin 账号登录后访问 `<web客户端>/admin`，web/桌面/安卓通用）与服务端内嵌静态页 `http://<host>:8080/admin`（兜底）。鉴权双轨：admin 用户登录 JWT（首个 admin 用 `add-user --admin` 或 `set-role` 产生），或 `ADMIN_TOKEN`（≥8 位，运维兜底轨，不设不影响 JWT 轨道）。功能：建/删用户、重置密码、角色管理、停用启用、书目改名/归组/删除、Open Library 自动归组、孤儿 blob 清理；「服务监控」标签页在有 readest-supervisor 推送时显示双服务状态并提供 启动/停止/重启 按钮（命令经 `/api/admin/service-command` 排队、由 supervisor 在下次推送时取走执行，契约见 `docs/selfhosted/sync-protocol.md` §6.6——停 sync-server 会熄火本邮箱，面板会先警示，恢复走 TUI/托盘/重启 supervisor）。
 
+## 用户存档导出/导入（待办⑫）
+
+每个账号可把自己的全部数据（书目+阅读记录+可选书文件）打包成一个 tar，再导入任意账号（本机或另一台服务器）：`GET /api/archive/export?scope=full|metadata` 流式导出，`POST /api/archive/import` 合并式导入（LWW，永不覆盖对方更新数据；重复导入幂等）。客户端入口=设置菜单「存档传输」；blob 走内容寻址去重，同服务器重复内容零新增字节。契约 `docs/selfhosted/sync-protocol.md` §6.8。
+
 ## 账户管理（T5 起）
 
 登录凭据为「账号（邮箱）+ 密码」；历史上生成的登录码原样当作密码使用，无需迁移。密码允许为空 = 免密登录（知道邮箱即可登入），服务端启动时会对这类账号打警告。

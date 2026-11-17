@@ -162,6 +162,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         service_commands: Mutex::new(std::collections::VecDeque::new()),
         started_at: std::time::Instant::now(),
         backup_busy: std::sync::atomic::AtomicBool::new(false),
+        archive_busy: std::sync::atomic::AtomicBool::new(false),
     });
 
     let addr = state.cfg.listen_addr.clone();

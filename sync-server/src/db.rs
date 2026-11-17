@@ -44,6 +44,9 @@ pub struct AppState {
     /// True while a backup tar is streaming; a second concurrent backup is
     /// refused (both would race on the tmp VACUUM snapshot path).
     pub backup_busy: std::sync::atomic::AtomicBool,
+    /// True while a user archive export/import runs (ROADMAP ⑫); the two
+    /// share one flag because both walk the blob store.
+    pub archive_busy: std::sync::atomic::AtomicBool,
 }
 
 pub type SharedState = std::sync::Arc<AppState>;

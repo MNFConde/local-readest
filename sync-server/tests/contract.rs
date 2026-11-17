@@ -40,6 +40,7 @@ pub fn test_state(cfg: Config) -> SharedState {
         service_commands: Mutex::new(std::collections::VecDeque::new()),
         started_at: std::time::Instant::now(),
         backup_busy: std::sync::atomic::AtomicBool::new(false),
+        archive_busy: std::sync::atomic::AtomicBool::new(false),
     })
 }
 
@@ -2417,4 +2418,459 @@ async fn admin_backup_tar_carries_rebuild_triple_and_auth() {
     assert_eq!(users, 1, "restored db must contain the seeded account");
     drop(conn);
     let _ = std::fs::remove_file(&restored);
+}
+
+// ── user archive (⑫) ──────────────────────────────────────────────────────
+
+/// POST raw tar bytes (the archive import body) with the caller's Bearer.
+async fn post_archive_import(
+    app: axum::Router,
+    token: &str,
+    data: Vec<u8>,
+) -> (StatusCode, Value, axum::http::HeaderMap) {
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/archive/import")
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/x-tar")
+        .header("Content-Length", data.len().to_string())
+        .body(axum::body::Body::from(data))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024 * 1024)
+        .await
+        .unwrap();
+    let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, json, headers)
+}
+
+/// Walk a tar into (name → bytes) pairs, asserting no reader errors.
+fn tar_entries(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
+    use std::io::Cursor;
+    let mut out = Vec::new();
+    for entry in tar::Archive::new(Cursor::new(bytes)).entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let name = entry.path().unwrap().to_string_lossy().into_owned();
+        let mut data = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut data).unwrap();
+        out.push((name, data));
+    }
+    out
+}
+
+/// Seed one book (row + uploaded file) and one note for `uid`.
+async fn seed_archive_user(state: &SharedState, uid: &str, hash: &str, title: &str) {
+    upload_catalog_book(state, uid, hash, title).await;
+    let conn = state.db.lock().unwrap();
+    sync_server::store::upsert_note(
+        &conn,
+        uid,
+        &json!({ "id": format!("{hash}-note1"), "updated_at": 1700000000000i64, "deleted_at": null, "note": "keep me" }),
+    )
+    .unwrap();
+}
+
+fn blobs_count(state: &SharedState) -> usize {
+    std::fs::read_dir(state.cfg.blobs_root())
+        .map(|d| d.filter_map(|e| e.ok()).count())
+        .unwrap_or(0)
+}
+
+#[tokio::test]
+async fn archive_export_requires_auth() {
+    let state = test_state(test_config("arch-auth"));
+    let app = routes::router(state);
+    let (status, body, _) = request(app, "GET", "/api/archive/export", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body, json!({ "error": "missing token", "code": "AUTH" }));
+}
+
+#[tokio::test]
+async fn archive_export_full_carries_manifest_records_blobs() {
+    use sha2::{Digest, Sha256};
+    let state = test_state(test_config("arch-full"));
+    let uid = seed_user(&state, "arch-a@x.com", "code-arch-a1");
+    seed_archive_user(&state, &uid, "hashAR1", "Archived Book").await;
+    let token = token_for(&state, &uid);
+
+    let app = routes::router(state.clone());
+    let (status, bytes, headers) = request_raw(
+        app,
+        "GET",
+        "/api/archive/export?scope=full",
+        Some(&token),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers.get("content-type").and_then(|v| v.to_str().ok()),
+        Some("application/x-tar")
+    );
+    assert!(
+        headers
+            .get("content-disposition")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("attachment; filename=\"readest-archive-")),
+        "unexpected content-disposition: {headers:?}"
+    );
+
+    let blob_name = format!("blobs/{}", hex::encode(Sha256::digest(b"fake epub bytes")));
+    let entries = tar_entries(&bytes);
+    let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names.len(), 3, "exactly the three members: {names:?}");
+    assert!(names.contains(&"manifest.json"));
+    assert!(names.contains(&"records.json"));
+    assert!(names.contains(&blob_name.as_str()));
+
+    let manifest: Value = serde_json::from_slice(
+        &entries
+            .iter()
+            .find(|(n, _)| n == "manifest.json")
+            .unwrap()
+            .1,
+    )
+    .unwrap();
+    assert_eq!(manifest["format"], "readest-archive");
+    assert_eq!(manifest["version"], 1);
+    assert_eq!(manifest["scope"], "full");
+    assert_eq!(manifest["counts"]["books"], 1);
+    assert_eq!(manifest["counts"]["notes"], 1);
+    assert_eq!(manifest["counts"]["files"], 1);
+    assert_eq!(
+        manifest["files"][0]["hash"],
+        blob_name.strip_prefix("blobs/").unwrap()
+    );
+    assert!(
+        manifest["files"][0]["path"]
+            .as_str()
+            .unwrap()
+            .starts_with("Readest/Books/hashAR1/"),
+        "files carry the per-uid path without the uid: {manifest}"
+    );
+
+    let records: Value =
+        serde_json::from_slice(&entries.iter().find(|(n, _)| n == "records.json").unwrap().1)
+            .unwrap();
+    assert_eq!(records["books"][0]["book_hash"], "hashAR1");
+    assert_eq!(records["books"][0]["data"]["title"], "Archived Book");
+    assert_eq!(records["notes"][0]["id"], "hashAR1-note1");
+    assert!(!state
+        .archive_busy
+        .load(std::sync::atomic::Ordering::Relaxed));
+}
+
+#[tokio::test]
+async fn archive_export_metadata_omits_blobs() {
+    let state = test_state(test_config("arch-meta"));
+    let uid = seed_user(&state, "arch-b@x.com", "code-arch-b1");
+    seed_archive_user(&state, &uid, "hashAR2", "Meta Only").await;
+    let token = token_for(&state, &uid);
+
+    let app = routes::router(state);
+    let (status, bytes, _) = request_raw(
+        app,
+        "GET",
+        "/api/archive/export?scope=metadata",
+        Some(&token),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = tar_entries(&bytes);
+    let names: Vec<String> = entries.iter().map(|(n, _)| n.clone()).collect();
+    assert_eq!(names, vec!["manifest.json", "records.json"]);
+    let manifest: Value = serde_json::from_slice(
+        &entries
+            .iter()
+            .find(|(n, _)| n == "manifest.json")
+            .unwrap()
+            .1,
+    )
+    .unwrap();
+    assert_eq!(manifest["scope"], "metadata");
+}
+
+#[tokio::test]
+async fn archive_import_rekeys_dedups_and_stays_visible() {
+    let state = test_state(test_config("arch-import"));
+    let uid_a = seed_user(&state, "arch-c@x.com", "code-arch-c1");
+    seed_archive_user(&state, &uid_a, "hashAR3", "Shared Bytes").await;
+    let token_a = token_for(&state, &uid_a);
+
+    let app = routes::router(state.clone());
+    let (_, tar, _) = request_raw(
+        app.clone(),
+        "GET",
+        "/api/archive/export?scope=full",
+        Some(&token_a),
+        None,
+        &[],
+    )
+    .await;
+
+    let uid_b = seed_user(&state, "arch-d@x.com", "code-arch-d1");
+    let token_b = token_for(&state, &uid_b);
+    let blobs_before = blobs_count(&state);
+
+    let (status, summary, _) = post_archive_import(app.clone(), &token_b, tar).await;
+    assert_eq!(status, StatusCode::OK, "summary: {summary}");
+    // Same server: the blob already exists, so import dedups instead of
+    // storing a second copy, and re-links it under B's uid.
+    assert_eq!(summary["books"], 1);
+    assert_eq!(summary["notes"], 1);
+    assert_eq!(summary["blobsStored"], 0);
+    assert_eq!(summary["blobsDeduped"], 1);
+    assert_eq!(summary["filesLinked"], 1);
+    assert_eq!(
+        blobs_count(&state),
+        blobs_before,
+        "zero new bytes in the store"
+    );
+
+    {
+        let conn = state.db.lock().unwrap();
+        let book = sync_server::store::get_book(&conn, &uid_b, "hashAR3")
+            .unwrap()
+            .expect("book row re-keyed to B");
+        assert_eq!(book.data["title"], "Shared Bytes");
+        let notes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM notes WHERE user_id=?",
+                [&uid_b],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(notes, 1);
+    }
+    assert!(
+        state
+            .cfg
+            .files_root()
+            .join(&uid_b)
+            .join("Readest/Books/hashAR3")
+            .exists(),
+        "B's per-uid copy must be re-linked from the blob store"
+    );
+
+    // The re-stamped synced_at keeps the row visible to clients whose pull
+    // cursor predates the import.
+    let (status, body, _) = request(
+        app,
+        "GET",
+        "/api/sync?since=2035-01-01T00:00:00Z&type=books",
+        Some(&token_b),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["books"].as_array().map(Vec::len),
+        Some(1),
+        "import must beat an existing cursor: {body}"
+    );
+}
+
+#[tokio::test]
+async fn archive_roundtrip_restores_after_server_wipe() {
+    let state = test_state(test_config("arch-loop"));
+    let uid = seed_user(&state, "arch-e@x.com", "code-arch-e1");
+    seed_archive_user(&state, &uid, "hashAR4", "Wiped Then Restored").await;
+    let token = token_for(&state, &uid);
+
+    let app = routes::router(state.clone());
+    let (_, tar, _) = request_raw(
+        app.clone(),
+        "GET",
+        "/api/archive/export?scope=full",
+        Some(&token),
+        None,
+        &[],
+    )
+    .await;
+
+    // Simulate the admin cascade (rows + per-uid files; the blob survives
+    // because dedup made it server-wide property).
+    {
+        let conn = state.db.lock().unwrap();
+        conn.execute("DELETE FROM books WHERE user_id=?", [&uid])
+            .unwrap();
+        conn.execute("DELETE FROM notes WHERE user_id=?", [&uid])
+            .unwrap();
+    }
+    std::fs::remove_dir_all(state.cfg.files_root().join(&uid)).unwrap();
+
+    let (status, summary, _) = post_archive_import(app, &token, tar).await;
+    assert_eq!(status, StatusCode::OK, "summary: {summary}");
+    assert_eq!(summary["books"], 1);
+    assert_eq!(summary["filesLinked"], 1);
+
+    {
+        let conn = state.db.lock().unwrap();
+        let book = sync_server::store::get_book(&conn, &uid, "hashAR4")
+            .unwrap()
+            .expect("restored");
+        assert_eq!(book.data["title"], "Wiped Then Restored");
+        let notes: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notes WHERE user_id=?", [&uid], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(notes, 1);
+    }
+    assert!(state
+        .cfg
+        .files_root()
+        .join(&uid)
+        .join("Readest/Books/hashAR4")
+        .exists());
+}
+
+#[tokio::test]
+async fn archive_import_lww_preserves_newer_target_rows() {
+    let state = test_state(test_config("arch-lww"));
+    let uid_a = seed_user(&state, "arch-f@x.com", "code-arch-f1");
+    let uid_b = seed_user(&state, "arch-g@x.com", "code-arch-g1");
+
+    // A: old row (updated_at 100). B: newer row (updated_at 200) same hash.
+    {
+        let conn = state.db.lock().unwrap();
+        sync_server::store::upsert_book_raw(
+            &conn,
+            &uid_a,
+            &sync_server::store::BookRow {
+                book_hash: "hashLWW1".into(),
+                meta_hash: String::new(),
+                updated_at: Some(100),
+                deleted_at: None,
+                synced_at: "2024-01-01T00:00:00Z".into(),
+                data: json!({ "title": "old copy" }),
+            },
+        )
+        .unwrap();
+        sync_server::store::upsert_book_raw(
+            &conn,
+            &uid_b,
+            &sync_server::store::BookRow {
+                book_hash: "hashLWW1".into(),
+                meta_hash: String::new(),
+                updated_at: Some(200),
+                deleted_at: None,
+                synced_at: "2024-01-02T00:00:00Z".into(),
+                data: json!({ "title": "newer local edit" }),
+            },
+        )
+        .unwrap();
+    }
+
+    let token_a = token_for(&state, &uid_a);
+    let app = routes::router(state.clone());
+    let (_, tar, _) = request_raw(
+        app.clone(),
+        "GET",
+        "/api/archive/export?scope=metadata",
+        Some(&token_a),
+        None,
+        &[],
+    )
+    .await;
+    let token_b = token_for(&state, &uid_b);
+    let (status, _, _) = post_archive_import(app, &token_b, tar).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let conn = state.db.lock().unwrap();
+    let book = sync_server::store::get_book(&conn, &uid_b, "hashLWW1")
+        .unwrap()
+        .expect("B's row survives");
+    assert_eq!(
+        book.data["title"], "newer local edit",
+        "importing an older archive must never clobber newer data"
+    );
+}
+
+#[tokio::test]
+async fn archive_import_rejects_invalid_archives() {
+    let state = test_state(test_config("arch-bad"));
+    let uid = seed_user(&state, "arch-h@x.com", "code-arch-h1");
+    let token = token_for(&state, &uid);
+    let app = routes::router(state);
+
+    fn build_tar(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut bytes);
+            for (name, data) in members {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(data.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, name, data.as_slice())
+                    .unwrap();
+            }
+            builder.finish().unwrap();
+        }
+        bytes
+    }
+
+    // Wrong format/version.
+    let bad = build_tar(&[
+        (
+            "manifest.json",
+            br#"{"format":"something-else","version":9}"#.to_vec(),
+        ),
+        ("records.json", b"{}".to_vec()),
+    ]);
+    let (status, body, _) = post_archive_import(app.clone(), &token, bad).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "unsupported archive format");
+
+    // Missing manifest.
+    let no_manifest = build_tar(&[("records.json", b"{}".to_vec())]);
+    let (status, body, _) = post_archive_import(app.clone(), &token, no_manifest).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "missing manifest.json");
+
+    // Not a tar at all.
+    let (status, _, _) = post_archive_import(app.clone(), &token, b"not a tar".to_vec()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // No credential → 401 before any parsing.
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/archive/import")
+        .body(axum::body::Body::from(Vec::new()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn archive_busy_guard_refuses_concurrent_operations() {
+    let state = test_state(test_config("arch-busy"));
+    let uid = seed_user(&state, "arch-i@x.com", "code-arch-i1");
+    let token = token_for(&state, &uid);
+    state
+        .archive_busy
+        .store(true, std::sync::atomic::Ordering::Release);
+    let app = routes::router(state.clone());
+    let (status, body, _) = request(
+        app.clone(),
+        "GET",
+        "/api/archive/export",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "archive operation already in progress");
+    let (status, _, _) = post_archive_import(app, &token, Vec::new()).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    state
+        .archive_busy
+        .store(false, std::sync::atomic::Ordering::Release);
 }

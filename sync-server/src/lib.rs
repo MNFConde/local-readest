@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod auth;
 pub mod config;
 pub mod db;
@@ -12,5 +13,6 @@ pub mod routes;
 pub mod storage;
 pub mod store;
 pub mod sync;
+pub mod tarstream;
 pub mod transform;
 pub mod users;
