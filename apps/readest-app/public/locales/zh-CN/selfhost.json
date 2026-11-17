@@ -107,5 +107,17 @@
   "Restart (stop + start, not counted as a failure)": "重启(停+启,不计为失败)",
   "Stopping sync-server kills this panel’s own recovery channel — restart it from the supervisor TUI/tray or by restarting the supervisor. Stop anyway?": "停止 sync-server 会切断本面板自己的恢复通道——需在 supervisor 的 TUI/托盘或重启 supervisor 恢复。仍要停止吗?",
   "Command queued — the supervisor runs it within ~5s.": "命令已入队——supervisor 将在约 5 秒内执行。",
-  "Commands queue on the server; the supervisor runs them on its next metrics push (~5s). Full stops stay at the OS level. Restart policy: exponential backoff (1s/4s/16s), circuit breaker after 5 rapid failures (an operator Start recovers it).": "命令在服务端排队,supervisor 在下次指标推送时执行(约 5 秒)。完全停止始终在操作系统层操作。重启策略:指数退避(1s/4s/16s),连续 5 次快速失败熔断(按「启动」即可恢复)。"
+  "Commands queue on the server; the supervisor runs them on its next metrics push (~5s). Full stops stay at the OS level. Restart policy: exponential backoff (1s/4s/16s), circuit breaker after 5 rapid failures (an operator Start recovers it).": "命令在服务端排队,supervisor 在下次指标推送时执行(约 5 秒)。完全停止始终在操作系统层操作。重启策略:指数退避(1s/4s/16s),连续 5 次快速失败熔断(按「启动」即可恢复)。",
+  "Archive Transfer": "存档传输",
+  "Export archive": "导出存档",
+  "Full archive (records + book files)": "全量存档（记录 + 书文件）",
+  "Metadata only (records, no book files)": "仅元数据（记录，不含书文件）",
+  "Preparing export…": "正在准备导出…",
+  "Export failed": "导出失败",
+  "Import archive": "导入存档",
+  "Importing…": "正在导入…",
+  "Imported {{books}} book(s), linked {{files}} file(s).": "已导入 {{books}} 本书，链接 {{files}} 个文件。",
+  "Import failed": "导入失败",
+  "Cannot reach the sync server": "无法连接同步服务器",
+  "Not signed in": "未登录"
 }

@@ -107,5 +107,17 @@
   "Restart (stop + start, not counted as a failure)": "Restart (stop + start, not counted as a failure)",
   "Stopping sync-server kills this panel’s own recovery channel — restart it from the supervisor TUI/tray or by restarting the supervisor. Stop anyway?": "Stopping sync-server kills this panel’s own recovery channel — restart it from the supervisor TUI/tray or by restarting the supervisor. Stop anyway?",
   "Command queued — the supervisor runs it within ~5s.": "Command queued — the supervisor runs it within ~5s.",
-  "Commands queue on the server; the supervisor runs them on its next metrics push (~5s). Full stops stay at the OS level. Restart policy: exponential backoff (1s/4s/16s), circuit breaker after 5 rapid failures (an operator Start recovers it).": "Commands queue on the server; the supervisor runs them on its next metrics push (~5s). Full stops stay at the OS level. Restart policy: exponential backoff (1s/4s/16s), circuit breaker after 5 rapid failures (an operator Start recovers it)."
+  "Commands queue on the server; the supervisor runs them on its next metrics push (~5s). Full stops stay at the OS level. Restart policy: exponential backoff (1s/4s/16s), circuit breaker after 5 rapid failures (an operator Start recovers it).": "Commands queue on the server; the supervisor runs them on its next metrics push (~5s). Full stops stay at the OS level. Restart policy: exponential backoff (1s/4s/16s), circuit breaker after 5 rapid failures (an operator Start recovers it).",
+  "Archive Transfer": "Archive Transfer",
+  "Export archive": "Export archive",
+  "Full archive (records + book files)": "Full archive (records + book files)",
+  "Metadata only (records, no book files)": "Metadata only (records, no book files)",
+  "Preparing export…": "Preparing export…",
+  "Export failed": "Export failed",
+  "Import archive": "Import archive",
+  "Importing…": "Importing…",
+  "Imported {{books}} book(s), linked {{files}} file(s).": "Imported {{books}} book(s), linked {{files}} file(s).",
+  "Import failed": "Import failed",
+  "Cannot reach the sync server": "Cannot reach the sync server",
+  "Not signed in": "Not signed in"
 }

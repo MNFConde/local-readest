@@ -41,6 +41,9 @@ const BUDGETS = {
   'apps/readest-app/src/app/auth/components/EmailPasswordAuth.tsx': 16,
   'apps/readest-app/src/context/AuthContext.tsx': 56,
   'apps/readest-app/src/app/library/page.tsx': 16,
+  // ⑤ admin entry (2 lines) + ⑫ archive entry (3 lines); both render
+  // self-gating fork components and nothing else.
+  'apps/readest-app/src/app/library/components/SettingsMenu.tsx': 6,
   'apps/readest-app/src/services/libraryService.ts': 18,
   'apps/readest-app/src/libs/storage.ts': 40,
   'apps/readest-app/src/helpers/auth.ts': 20,
