@@ -77,6 +77,10 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/api/archive/export", get(crate::archive::export))
         .route("/api/archive/import", post(crate::archive::import))
+        .route("/api/pushes", post(crate::push::create))
+        .route("/api/pushes/inbox", get(crate::push::inbox))
+        .route("/api/pushes/{id}/accept", post(crate::push::accept))
+        .route("/api/pushes/{id}/decline", post(crate::push::decline))
         .route("/api/deepl/translate", post(crate::proxy::deepl_translate))
         .route(
             "/api/yandex-translate",

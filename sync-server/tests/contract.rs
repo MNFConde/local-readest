@@ -2874,3 +2874,522 @@ async fn archive_busy_guard_refuses_concurrent_operations() {
         .archive_busy
         .store(false, std::sync::atomic::Ordering::Release);
 }
+
+// ── user-to-user push (⑬) ─────────────────────────────────────────────────
+
+async fn post_push(
+    app: axum::Router,
+    token: &str,
+    body: Value,
+) -> (StatusCode, Value, axum::http::HeaderMap) {
+    request(app, "POST", "/api/pushes", Some(token), Some(body)).await
+}
+
+async fn decide_push(
+    app: axum::Router,
+    id: i64,
+    action: &str,
+    token: &str,
+) -> (StatusCode, Value, axum::http::HeaderMap) {
+    request(
+        app,
+        "POST",
+        &format!("/api/pushes/{id}/{action}"),
+        Some(token),
+        None,
+    )
+    .await
+}
+
+async fn inbox_of(app: axum::Router, token: &str) -> Vec<Value> {
+    let (status, body, _) = request(app, "GET", "/api/pushes/inbox", Some(token), None).await;
+    assert_eq!(status, StatusCode::OK, "inbox: {body}");
+    body["items"].as_array().cloned().unwrap_or_default()
+}
+
+/// Seed a book row with a chosen updated_at plus its uploaded file — the
+/// full-control variant of `upload_catalog_book`.
+async fn seed_book_with_ts(
+    state: &SharedState,
+    uid: &str,
+    hash: &str,
+    title: &str,
+    ts: Option<i64>,
+) {
+    {
+        let conn = state.db.lock().unwrap();
+        sync_server::store::upsert_book_raw(
+            &conn,
+            uid,
+            &sync_server::store::BookRow {
+                book_hash: hash.into(),
+                meta_hash: String::new(),
+                updated_at: ts,
+                deleted_at: None,
+                synced_at: String::new(),
+                data: json!({ "title": title, "author": "Someone", "language": "zh" }),
+            },
+        )
+        .unwrap();
+    }
+    let token = token_for(state, uid);
+    let (s, _, _) = put_blob(
+        routes::router(state.clone()),
+        &token,
+        &format!("{uid}/Readest/Books/{hash}/book.epub"),
+        b"fake epub bytes".to_vec(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn push_requires_auth() {
+    let state = test_state(test_config("push-auth"));
+    let app = routes::router(state);
+    let (status, body, _) = request(app.clone(), "GET", "/api/pushes/inbox", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "AUTH");
+    let (status, _, _) = request(app.clone(), "POST", "/api/pushes", None, Some(json!({}))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = request(app.clone(), "POST", "/api/pushes/1/accept", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = request(app, "POST", "/api/pushes/1/decline", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn push_create_validates_recipient_book_and_files() {
+    let state = test_state(test_config("push-create"));
+    let uid_a = seed_user(&state, "push-a@x.com", "code-push-a1");
+    seed_book_with_ts(&state, &uid_a, "hashPS1", "Pushed Book", None).await;
+    seed_user(&state, "push-b@x.com", "code-push-b1");
+    // A disabled account still resolves but refuses offers.
+    {
+        let conn = state.db.lock().unwrap();
+        sync_server::users::ensure_user(&conn, "push-c@x.com", "code-push-c1").unwrap();
+        sync_server::users::set_disabled(&conn, "push-c@x.com", true).unwrap();
+    }
+    let token_a = token_for(&state, &uid_a);
+    let app = routes::router(state.clone());
+
+    // Unknown recipient.
+    let (status, body, _) = post_push(
+        app.clone(),
+        &token_a,
+        json!({ "to": "ghost@x.com", "bookHash": "hashPS1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+    // Self-push.
+    let (status, body, _) = post_push(
+        app.clone(),
+        &token_a,
+        json!({ "to": "push-a@x.com", "bookHash": "hashPS1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    // Disabled recipient.
+    let (status, body, _) = post_push(
+        app.clone(),
+        &token_a,
+        json!({ "to": "push-c@x.com", "bookHash": "hashPS1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    // Unknown book: no row AND no file.
+    let (status, body, _) = post_push(
+        app.clone(),
+        &token_a,
+        json!({ "to": "push-b@x.com", "bookHash": "hashNOPE" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+    // File on the server but no books row (uploaded out-of-band).
+    let token_for_file = token_for(&state, &uid_a);
+    let (s, _, _) = put_blob(
+        routes::router(state.clone()),
+        &token_for_file,
+        &format!("{uid_a}/Readest/Books/hashORPH/x.epub"),
+        b"orphan".to_vec(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (status, body, _) = post_push(
+        app.clone(),
+        &token_a,
+        json!({ "to": "push-b@x.com", "bookHash": "hashORPH" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+    assert_eq!(body["error"], "you do not have this book");
+
+    // Happy path, then the duplicate-pending refusal.
+    let (status, body, _) = post_push(
+        app.clone(),
+        &token_a,
+        json!({ "to": "push-b@x.com", "bookHash": "hashPS1", "message": "推荐" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["pushed"], true);
+    let (status, body, _) = post_push(
+        app,
+        &token_a,
+        json!({ "to": "push-b@x.com", "bookHash": "hashPS1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+}
+
+#[tokio::test]
+async fn push_inbox_scoped_to_recipient() {
+    let state = test_state(test_config("push-inbox"));
+    let uid_a = seed_user(&state, "in-a@x.com", "code-in-a1");
+    let uid_b = seed_user(&state, "in-b@x.com", "code-in-b1");
+    let uid_c = seed_user(&state, "in-c@x.com", "code-in-c1");
+    seed_book_with_ts(&state, &uid_a, "hashIN1", "Scoped Book", None).await;
+    let token_a = token_for(&state, &uid_a);
+    let app = routes::router(state.clone());
+
+    let (status, body, _) = post_push(
+        app.clone(),
+        &token_a,
+        json!({ "to": "in-b@x.com", "bookHash": "hashIN1", "message": "give it a try" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let items = inbox_of(app.clone(), &token_for(&state, &uid_b)).await;
+    assert_eq!(items.len(), 1, "only the recipient sees the offer");
+    assert_eq!(items[0]["from"], "in-a@x.com");
+    assert_eq!(items[0]["bookHash"], "hashIN1");
+    assert_eq!(items[0]["title"], "Scoped Book");
+    assert_eq!(items[0]["author"], "Someone");
+    assert_eq!(items[0]["message"], "give it a try");
+    assert!(items[0]["id"].as_i64().is_some());
+
+    assert_eq!(
+        inbox_of(app.clone(), &token_for(&state, &uid_c))
+            .await
+            .len(),
+        0,
+        "third parties never see the offer"
+    );
+    assert_eq!(
+        inbox_of(app, &token_a).await.len(),
+        0,
+        "the sender is not their own recipient"
+    );
+}
+
+#[tokio::test]
+async fn push_accept_links_rekeys_snapshot_and_stays_visible() {
+    let state = test_state(test_config("push-accept"));
+    let uid_a = seed_user(&state, "ac-a@x.com", "code-ac-a1");
+    let uid_b = seed_user(&state, "ac-b@x.com", "code-ac-b1");
+    seed_book_with_ts(&state, &uid_a, "hashAC1", "Snapshot Title", None).await;
+    let token_a = token_for(&state, &uid_a);
+    let token_b = token_for(&state, &uid_b);
+    let app = routes::router(state.clone());
+
+    let (status, body, _) = post_push(
+        app.clone(),
+        &token_a,
+        json!({ "to": "ac-b@x.com", "bookHash": "hashAC1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let push_id = body["id"].as_i64().expect("push id");
+
+    // The sender edits their own copy after the offer: the snapshot, not the
+    // live row, is what gets delivered.
+    seed_book_with_ts(&state, &uid_a, "hashAC1", "Edited Later", None).await;
+
+    let blobs_before = blobs_count(&state);
+    let (status, body, _) = decide_push(app.clone(), push_id, "accept", &token_b).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["filesLinked"], 1);
+    assert_eq!(body["filesSkipped"], 0);
+    assert_eq!(blobs_count(&state), blobs_before, "zero new blob bytes");
+
+    {
+        let conn = state.db.lock().unwrap();
+        let book = sync_server::store::get_book(&conn, &uid_b, "hashAC1")
+            .unwrap()
+            .expect("book row re-keyed to B");
+        assert_eq!(book.data["title"], "Snapshot Title");
+    }
+    assert!(
+        state
+            .cfg
+            .files_root()
+            .join(&uid_b)
+            .join("Readest/Books/hashAC1/book.epub")
+            .exists(),
+        "B's copy must be hard-linked into their own tree"
+    );
+
+    // Re-stamped synced_at keeps the row visible past any existing cursor.
+    let (status, body, _) = request(
+        app.clone(),
+        "GET",
+        "/api/sync?since=2035-01-01T00:00:00Z&type=books",
+        Some(&token_b),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["books"].as_array().map(Vec::len),
+        Some(1),
+        "accept must beat an existing cursor: {body}"
+    );
+
+    // Decided is final.
+    let (status, body, _) = decide_push(app, push_id, "accept", &token_b).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+}
+
+#[tokio::test]
+async fn push_accept_lww_preserves_newer_target_row() {
+    let state = test_state(test_config("push-lww"));
+    let uid_a = seed_user(&state, "lw-a@x.com", "code-lw-a1");
+    let uid_b = seed_user(&state, "lw-b@x.com", "code-lw-b1");
+    seed_book_with_ts(&state, &uid_a, "hashLW1", "sender edit", Some(100)).await;
+    // B already has a newer local edit of the same book.
+    seed_book_with_ts(&state, &uid_b, "hashLW1", "newer local edit", Some(200)).await;
+    let token_a = token_for(&state, &uid_a);
+    let token_b = token_for(&state, &uid_b);
+    let app = routes::router(state.clone());
+
+    let (status, body, _) = post_push(
+        app.clone(),
+        &token_a,
+        json!({ "to": "lw-b@x.com", "bookHash": "hashLW1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let push_id = body["id"].as_i64().unwrap();
+
+    let (status, _, _) = decide_push(app, push_id, "accept", &token_b).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let conn = state.db.lock().unwrap();
+    let book = sync_server::store::get_book(&conn, &uid_b, "hashLW1")
+        .unwrap()
+        .expect("row must exist");
+    assert_eq!(book.updated_at, Some(200), "row LWW keeps the newer row");
+    assert_eq!(book.data["title"], "newer local edit");
+}
+
+#[tokio::test]
+async fn push_decline_is_final_and_keeps_source() {
+    let state = test_state(test_config("push-decline"));
+    let uid_a = seed_user(&state, "dc-a@x.com", "code-dc-a1");
+    let uid_b = seed_user(&state, "dc-b@x.com", "code-dc-b1");
+    seed_book_with_ts(&state, &uid_a, "hashDC1", "Declined Book", None).await;
+    let token_a = token_for(&state, &uid_a);
+    let token_b = token_for(&state, &uid_b);
+    let app = routes::router(state.clone());
+
+    let (status, body, _) = post_push(
+        app.clone(),
+        &token_a,
+        json!({ "to": "dc-b@x.com", "bookHash": "hashDC1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let push_id = body["id"].as_i64().unwrap();
+
+    let (status, body, _) = decide_push(app.clone(), push_id, "decline", &token_b).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["declined"], push_id);
+    assert!(inbox_of(app.clone(), &token_b).await.is_empty());
+    {
+        let conn = state.db.lock().unwrap();
+        assert!(
+            sync_server::store::get_book(&conn, &uid_b, "hashDC1")
+                .unwrap()
+                .is_none(),
+            "decline must not land any row"
+        );
+    }
+    assert!(
+        state
+            .cfg
+            .files_root()
+            .join(&uid_a)
+            .join("Readest/Books/hashDC1/book.epub")
+            .exists(),
+        "the sender's copy is untouched"
+    );
+
+    // Decided is final in both directions.
+    let (status, _, _) = decide_push(app.clone(), push_id, "decline", &token_b).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _, _) = decide_push(app.clone(), push_id, "accept", &token_b).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    // A third user's token cannot even see it.
+    let uid_c = seed_user(&state, "dc-c@x.com", "code-dc-c1");
+    let (status, body, _) = decide_push(app, push_id, "accept", &token_for(&state, &uid_c)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+}
+
+#[tokio::test]
+async fn push_accept_quota_exceeded_keeps_pending() {
+    // Default test quota is 1 MiB: A's 1 MiB upload just fits, B's existing
+    // 0.5 MiB usage makes the same book exceed it on accept.
+    let state = test_state(test_config("push-quota"));
+    let uid_a = seed_user(&state, "qt-a@x.com", "code-qt-a1");
+    let uid_b = seed_user(&state, "qt-b@x.com", "code-qt-b1");
+    let token_a = token_for(&state, &uid_a);
+    let token_b = token_for(&state, &uid_b);
+    let app = routes::router(state.clone());
+
+    let (s, _, _) = put_blob(
+        routes::router(state.clone()),
+        &token_b,
+        &format!("{uid_b}/Readest/Books/hashOTHER/existing.bin"),
+        vec![7u8; 512 * 1024],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    // A seeds the row and uploads exactly 1 MiB — fits the quota with zero
+    // headroom to spare (any extra byte would fail A's own upload).
+    {
+        let conn = state.db.lock().unwrap();
+        sync_server::store::upsert_book_raw(
+            &conn,
+            &uid_a,
+            &sync_server::store::BookRow {
+                book_hash: "hashQT1".into(),
+                meta_hash: String::new(),
+                updated_at: None,
+                deleted_at: None,
+                synced_at: String::new(),
+                data: json!({ "title": "Big Book", "author": "Someone" }),
+            },
+        )
+        .unwrap();
+    }
+    let (s, _, _) = put_blob(
+        routes::router(state.clone()),
+        &token_a,
+        &format!("{uid_a}/Readest/Books/hashQT1/big.epub"),
+        vec![9u8; 1024 * 1024],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "A's upload must exactly fit the quota");
+
+    let (status, body, _) = post_push(
+        app.clone(),
+        &token_a,
+        json!({ "to": "qt-b@x.com", "bookHash": "hashQT1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let push_id = body["id"].as_i64().unwrap();
+
+    let (status, body, _) = decide_push(app.clone(), push_id, "accept", &token_b).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "body: {body}");
+    assert_eq!(body["code"], "QUOTA_EXCEEDED");
+    assert_eq!(
+        inbox_of(app, &token_b).await.len(),
+        1,
+        "a failed accept must stay pending for a retry"
+    );
+}
+
+#[tokio::test]
+async fn push_accept_fails_cleanly_when_sender_files_gone() {
+    let state = test_state(test_config("push-gone"));
+    let uid_a = seed_user(&state, "gn-a@x.com", "code-gn-a1");
+    let uid_b = seed_user(&state, "gn-b@x.com", "code-gn-b1");
+    seed_book_with_ts(&state, &uid_a, "hashGN1", "Vanishing Book", None).await;
+    let token_a = token_for(&state, &uid_a);
+    let token_b = token_for(&state, &uid_b);
+    let app = routes::router(state.clone());
+
+    let (status, body, _) = post_push(
+        app.clone(),
+        &token_a,
+        json!({ "to": "gn-b@x.com", "bookHash": "hashGN1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let push_id = body["id"].as_i64().unwrap();
+
+    std::fs::remove_dir_all(state.cfg.files_root().join(&uid_a)).unwrap();
+    let (status, body, _) = decide_push(app.clone(), push_id, "accept", &token_b).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    assert!(body["error"].as_str().unwrap_or("").contains("sender"));
+    assert_eq!(
+        inbox_of(app, &token_b).await.len(),
+        1,
+        "still pending: the recipient can decline instead"
+    );
+    {
+        let conn = state.db.lock().unwrap();
+        assert!(sync_server::store::get_book(&conn, &uid_b, "hashGN1")
+            .unwrap()
+            .is_none());
+    }
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn delete_user_cascades_pushes_both_sides() {
+    let state = test_state(test_config("push-cascade"));
+    let uid_a = seed_user(&state, "cs-a@x.com", "code-cs-a1");
+    let uid_b = seed_user(&state, "cs-b@x.com", "code-cs-b1");
+    seed_book_with_ts(&state, &uid_a, "hashCS1", "Cascade Book", None).await;
+    let token_a = token_for(&state, &uid_a);
+    let admin_token = sync_server::jwt::issue(
+        &state.cfg.jwt_secret,
+        "nobody",
+        Some("admin@t.test"),
+        "pro",
+        Some("admin"),
+    )
+    .unwrap();
+    let tok = Some(admin_token.as_str());
+    let app = routes::router(state.clone());
+
+    let (status, _, _) = post_push(
+        app.clone(),
+        &token_a,
+        json!({ "to": "cs-b@x.com", "bookHash": "hashCS1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let pushes = |state: &SharedState| -> i64 {
+        let conn = state.db.lock().unwrap();
+        conn.query_row("SELECT COUNT(*) FROM pushes", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(pushes(&state), 1);
+
+    // Deleting either side clears the offer.
+    let (status, _, _) = admin_request(
+        app.clone(),
+        "DELETE",
+        "/api/admin/users/cs-a%40x.com",
+        tok,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(pushes(&state), 0, "sender delete clears their offers");
+
+    seed_book_with_ts(&state, &uid_b, "hashCS2", "Back Book", None).await;
+    let token_b = token_for(&state, &uid_b);
+    let (status, _, _) = post_push(
+        app,
+        &token_b,
+        json!({ "to": "cs-a@x.com", "bookHash": "hashCS2" }),
+    )
+    .await;
+    // Recipient no longer exists now.
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

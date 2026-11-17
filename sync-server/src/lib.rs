@@ -7,6 +7,7 @@ pub mod jwt;
 #[cfg(feature = "library")]
 pub mod library;
 pub mod proxy;
+pub mod push;
 pub mod ratelimit;
 pub mod rfc3339;
 pub mod routes;

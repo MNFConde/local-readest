@@ -817,7 +817,9 @@ fn stream_blob<R: Read>(
     Ok(())
 }
 
-fn book_row_from_value(v: &Value) -> Option<store::BookRow> {
+/// Parse one §6.8 records.json books[] row; shared with ⑬'s push accept,
+/// whose stored snapshot uses the identical shape.
+pub(crate) fn book_row_from_value(v: &Value) -> Option<store::BookRow> {
     Some(store::BookRow {
         book_hash: v.get("book_hash")?.as_str()?.to_string(),
         meta_hash: v

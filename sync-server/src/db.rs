@@ -95,6 +95,21 @@ const SCHEMA: &str = r#"
         user_id TEXT, salt_id TEXT, alg TEXT, salt TEXT, created_at TEXT,
         PRIMARY KEY (user_id, salt_id)
     );
+    -- ROADMAP ⑬: user-to-user book push offers. from_uid/to_uid reference
+    -- users.id (not user_id-named: both sides matter, the admin delete
+    -- cascade clears rows on either side). payload_json snapshots the
+    -- sender's books row in the §6.8 records.json books[] shape.
+    CREATE TABLE IF NOT EXISTS pushes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        from_uid TEXT NOT NULL,
+        to_uid TEXT NOT NULL,
+        book_hash TEXT NOT NULL,
+        message TEXT NOT NULL DEFAULT '',
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        decided_at TEXT
+    );
     -- library feature: one authoritative bibliography row per distinct book
     -- content (hash), plus the work-grouping layer above it. Reading state
     -- stays per-user in books/notes; these tables only describe the books.

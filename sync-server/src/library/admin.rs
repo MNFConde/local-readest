@@ -534,6 +534,13 @@ async fn delete_user(
         )
         .map_err(super::admin_error)?;
     }
+    // ⑬ pushes key both sides explicitly (no user_id column), so a deleted
+    // account's offers and inbox entries both go.
+    conn.execute(
+        "DELETE FROM pushes WHERE from_uid = ?1 OR to_uid = ?1",
+        params![uid],
+    )
+    .map_err(super::admin_error)?;
     conn.execute("DELETE FROM users WHERE email = ?1", params![email])
         .map_err(super::admin_error)?;
     drop(conn);
