@@ -12,6 +12,8 @@ import { TranslationFunc } from '@/hooks/useTranslation';
 import { createProgressThrottle, ProgressHandler, ProgressPayload } from '@/utils/transfer';
 import { eventDispatcher } from '@/utils/event';
 import { isAbsOfflineCapable, isAudiobook } from '@/utils/audiobook';
+// SELFHOSTED (fork): per-connection metadata-only gate (⑪-P2).
+import { isMetadataOnlyConnection } from '@/libs/selfhost/connections';
 import { getTransferMessages } from './transferMessages';
 
 const TRANSFER_QUEUE_KEY = 'readest_transfer_queue';
@@ -72,11 +74,14 @@ class TransferManager {
    * A Readest Cloud file is only reachable through its `books` row, and that
    * row is pushed only while Books sync is on. Uploading with it off stores
    * files no other device can ever list, while still spending quota.
+   * A metadata-only selfhosted connection (⑪-P2) also blocks uploads: it
+   * syncs records, never book files.
    */
   isBookUploadAllowed(): boolean {
     return (
       isReadestCloudStorageActive(useSettingsStore.getState().settings) &&
-      isSyncCategoryEnabled('book')
+      isSyncCategoryEnabled('book') &&
+      !isMetadataOnlyConnection()
     );
   }
 
@@ -216,6 +221,10 @@ class TransferManager {
 
     // ABS books stream from the server; there is no cloud file to download.
     if (isAudiobook(book)) return null;
+
+    // A metadata-only connection (⑪-P2) never pulls book files; explicit
+    // downloads surface the hint in useBookTransferActions instead.
+    if (isMetadataOnlyConnection()) return null;
 
     const store = useTransferStore.getState();
 

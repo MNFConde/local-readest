@@ -38,6 +38,13 @@ const runFileBookDownload = vi.hoisted(() =>
 const queueUpload = vi.hoisted(() => vi.fn(() => 'transfer-1'));
 const queueDownload = vi.hoisted(() => vi.fn(() => 'transfer-1'));
 
+// ⑪-P2: metadata-only selfhosted connection — the file gates live in the
+// fork module (queue refuses internally) and the explicit-action hints are
+// fork functions, so both are stubbed here.
+const selfhostConn = vi.hoisted(() => ({ metadataOnly: false }));
+const toastUploadRefused = vi.hoisted(() => vi.fn());
+const toastDownloadRefused = vi.hoisted(() => vi.fn());
+
 vi.mock('@/hooks/useTranslation', () => ({
   useTranslation:
     () =>
@@ -69,6 +76,12 @@ vi.mock('@/services/transferManager', () => ({
     queueUpload,
     queueDownload,
   },
+}));
+
+vi.mock('@/libs/selfhost/connections', () => ({
+  isMetadataOnlyConnection: () => selfhostConn.metadataOnly,
+  toastMetadataUploadRefused: toastUploadRefused,
+  toastMetadataDownloadRefused: toastDownloadRefused,
 }));
 
 const { useBookTransferActions } = await import('@/app/library/hooks/useBookTransferActions');
@@ -107,6 +120,7 @@ beforeEach(() => {
   routing.readestEnabled = true;
   routing.booksSyncEnabled = true;
   routing.backends = [];
+  selfhostConn.metadataOnly = false;
 });
 
 describe('useBookTransferActions upload routing (issue #5062)', () => {
@@ -386,5 +400,102 @@ describe('useBookTransferActions download routing (issue #5062)', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('useBookTransferActions on a metadata-only connection (⑪-P2)', () => {
+  it('explicit upload hints and returns false when the queue gate refused', async () => {
+    selfhostConn.metadataOnly = true;
+    // The TransferManager gate refuses (null) on a metadata-only connection.
+    queueUpload.mockReturnValueOnce(null as unknown as string);
+    const dispatchSpy = vi.spyOn(eventDispatcher, 'dispatch');
+
+    const { result } = setup();
+    const ok = await result.current.handleBookUpload(makeBook());
+
+    expect(queueUpload).toHaveBeenCalledWith(makeBook(), 1);
+    expect(toastUploadRefused).toHaveBeenCalledWith('Title');
+    expect(ok).toBe(false);
+    // The hint goes out through the fork helper, not an upstream toast.
+    expect(dispatchSpy.mock.calls.filter(([event]) => event === 'toast')).toHaveLength(0);
+  });
+
+  it('explicit upload still reaches an enabled file backend', async () => {
+    selfhostConn.metadataOnly = true;
+    // The queue gate refuses (null), as in production; the mirror must still win.
+    queueUpload.mockReturnValueOnce(null as unknown as string);
+    routing.backends = ['gdrive'];
+
+    const { result } = setup();
+    const ok = await result.current.handleBookUpload(makeBook());
+
+    expect(runFileBookUpload).toHaveBeenCalledWith(envConfig, makeBook());
+    expect(toastUploadRefused).not.toHaveBeenCalled();
+    expect(ok).toBe(true);
+  });
+
+  it('a direct download refuses with a hint and never reaches the native path', async () => {
+    selfhostConn.metadataOnly = true;
+    const downloadBook = vi.fn(async () => {});
+
+    const { result } = setup({ downloadBook } as unknown as AppService);
+    const ok = await result.current.handleBookDownload(makeBook({ uploadedAt: 12345 }), {
+      queued: false,
+    });
+
+    expect(ok).toBe(false);
+    expect(downloadBook).not.toHaveBeenCalled();
+    expect(toastDownloadRefused).toHaveBeenCalledWith('Title');
+  });
+
+  it('bulk queued downloads are refused silently (batch reports elsewhere)', async () => {
+    selfhostConn.metadataOnly = true;
+    const dispatchSpy = vi.spyOn(eventDispatcher, 'dispatch');
+
+    const { result } = setup();
+    const ok = await result.current.handleBookDownload(makeBook({ uploadedAt: 12345 }), {
+      queued: true,
+      silent: true,
+    });
+
+    expect(queueDownload).not.toHaveBeenCalled();
+    expect(toastDownloadRefused).not.toHaveBeenCalled();
+    expect(dispatchSpy.mock.calls.filter(([event]) => event === 'toast')).toHaveLength(0);
+    expect(ok).toBe(false);
+  });
+
+  it('file mirrors stay reachable; only the native channel is gated', async () => {
+    selfhostConn.metadataOnly = true;
+    routing.backends = ['webdav'];
+
+    const { result, updateBook } = setup();
+    const ok = await result.current.handleBookDownload(makeBook({ uploadedAt: 12345 }), {
+      queued: false,
+    });
+
+    expect(runFileBookDownload).toHaveBeenCalledWith(
+      envConfig,
+      expect.anything(),
+      expect.any(Function),
+    );
+    expect(toastDownloadRefused).not.toHaveBeenCalled();
+    expect(updateBook).toHaveBeenCalled();
+    expect(ok).toBe(true);
+  });
+
+  it('a mirror miss falls to the refusal, not to the native download', async () => {
+    selfhostConn.metadataOnly = true;
+    routing.backends = ['webdav'];
+    runFileBookDownload.mockResolvedValueOnce(false);
+    const downloadBook = vi.fn(async () => {});
+
+    const { result } = setup({ downloadBook } as unknown as AppService);
+    const ok = await result.current.handleBookDownload(makeBook({ uploadedAt: 12345 }), {
+      queued: false,
+    });
+
+    expect(ok).toBe(false);
+    expect(downloadBook).not.toHaveBeenCalled();
+    expect(toastDownloadRefused).toHaveBeenCalledWith('Title');
   });
 });

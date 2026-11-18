@@ -14,6 +14,13 @@ import {
 import { isSyncCategoryEnabled } from '@/services/sync/syncCategories';
 import { runFileBookDownload, runFileBookUpload } from '@/services/sync/file/runLibrarySync';
 import { recordFlow } from '@/services/sync/dataFlow/log';
+// SELFHOSTED (fork): metadata-only connection gate + its explicit-action
+// hints (⑪-P2); the messages live in the fork module, not here.
+import {
+  isMetadataOnlyConnection,
+  toastMetadataDownloadRefused,
+  toastMetadataUploadRefused,
+} from '@/libs/selfhost/connections';
 
 /**
  * One throttle runs per in-flight transfer, and every emit re-renders the
@@ -134,6 +141,12 @@ export const useBookTransferActions = (
         });
         return false;
       }
+      // SELFHOSTED (fork): same never-silent contract for a metadata-only
+      // connection (⑪-P2) — the queue gate refused, so hint and stop here.
+      if (readest && isMetadataOnlyConnection() && backends.length === 0) {
+        toastMetadataUploadRefused(book.title);
+        return false;
+      }
       eventDispatcher.dispatch('toast', {
         type: backends.length > 0 || readest ? 'error' : 'info',
         timeout: 5000,
@@ -189,6 +202,15 @@ export const useBookTransferActions = (
           }
           return false;
         }
+      }
+
+      // SELFHOSTED (fork): a metadata-only connection (⑪-P2) keeps the shelf
+      // row but never pulls the file — gate the native Readest path (direct
+      // and queued); third-party file mirrors above stay untouched. Reaching
+      // this line means no mirror served the file, so the native path is next.
+      if (readest && isMetadataOnlyConnection()) {
+        if (!silent) toastMetadataDownloadRefused(book.title);
+        return false;
       }
 
       if (redownload || !queued) {
