@@ -24,10 +24,27 @@ import {
   downloadDeviceIdentityBackup,
   generateDeviceIdentity,
   getDeviceIdentity,
+  isDeviceIdShape,
   parseDeviceIdentity,
   saveDeviceIdentity,
 } from '@/libs/selfhost/deviceIdentity';
 import type { DeviceIdentity } from '@/libs/selfhost/deviceIdentity';
+// ROADMAP ⑪-P2: remembered multi-server connections. Each successful sign-in
+// is recorded; switching back is one click on a remembered login below. A
+// connection switch resets the previous connection's sync cursors and
+// persisted transfer queue, then hard-reloads so every store rebuilds from
+// the other connection's persisted state.
+import {
+  clearPersistedTransferQueue,
+  getActiveConnectionId,
+  listConnections,
+  reloadForConnectionSwitch,
+  removeConnection,
+  resetSyncCursorsForSwitch,
+  setConnectionMode,
+  upsertConnectionOnLogin,
+} from '@/libs/selfhost/connections';
+import type { ConnectionMode, SelfhostConnection } from '@/libs/selfhost/connections';
 
 interface SelfhostedAuthFormProps {
   // Called with the JWT issued by the sync server. The caller is responsible
@@ -51,6 +68,16 @@ export default function SelfhostedAuthForm({ onSelfhostedLogin }: SelfhostedAuth
   const [identity, setIdentity] = useState<DeviceIdentity | null>(() => getDeviceIdentity());
   const [revealed, setRevealed] = useState(false);
   const [importing, setImporting] = useState(false);
+  // ⑪-P2 remembered logins: chips prefill the form, Manage edits mode/forget.
+  const [connections, setConnections] = useState<SelfhostConnection[]>(() => listConnections());
+  const [managing, setManaging] = useState(false);
+  const [confirmForgetId, setConfirmForgetId] = useState('');
+  // Prefill for the uncontrolled account inputs (defaultValue + key remount,
+  // so password managers still own the fields).
+  const [preset, setPreset] = useState<{ email: string; password: string }>({
+    email: '',
+    password: '',
+  });
 
   useEffect(() => {
     const vv = window.visualViewport;
@@ -127,10 +154,27 @@ export default function SelfhostedAuthForm({ onSelfhostedLogin }: SelfhostedAuth
       const { access_token } = await selfhostedLogin(email, password);
       const user = jwtToUser(access_token);
       if (!user) throw new Error('invalid token');
+      // Record the login as the (possibly new) active connection. A switch
+      // must not inherit the previous connection's sync cursors (settings
+      // are device-global) or its persisted transfer queue (those files
+      // belong to the old account's books).
+      const { switched } = upsertConnectionOnLogin(serverUrl, email, password);
+      if (switched) {
+        await resetSyncCursorsForSwitch();
+        clearPersistedTransferQueue();
+      }
       // Persist the credentials so an expired JWT can be refreshed without
       // re-prompting (mirrors Supabase's persisted refresh_token).
       saveCredentials(email, password);
       onSelfhostedLogin?.(access_token, user);
+      if (switched) {
+        // Full reload (supersedes the SPA navigate above): every store —
+        // shelf, settings cursors, in-memory transfer queue — rebuilds from
+        // the other connection's persisted state on boot.
+        const redirectTo = new URLSearchParams(window.location.search).get('redirect');
+        reloadForConnectionSwitch(redirectTo);
+        return;
+      }
     } catch (e) {
       describeLoginError(e as Error & { status?: number; reason?: string }, device);
     } finally {
@@ -231,8 +275,107 @@ export default function SelfhostedAuthForm({ onSelfhostedLogin }: SelfhostedAuth
     }
   };
 
+  // ⑪-P2 remembered logins. A chip prefills the form (device chips switch to
+  // the device mode — that login uses this device's stored identity, not a
+  // form secret); Manage edits per-connection transfer mode or forgets.
+  const applyConnection = (conn: SelfhostConnection) => {
+    setError('');
+    setNotice('');
+    setServerUrl(conn.serverUrl);
+    if (isDeviceIdShape(conn.email)) {
+      setMode('device');
+      setIdentity(getDeviceIdentity());
+      return;
+    }
+    setMode('account');
+    setPreset({ email: conn.email, password: conn.password });
+  };
+
+  const updateConnectionMode = (conn: SelfhostConnection, mode: ConnectionMode) => {
+    setConnectionMode(conn.id, mode);
+    setConnections(listConnections());
+  };
+
+  const forgetConnection = (id: string) => {
+    removeConnection(id);
+    setConnections(listConnections());
+    setConfirmForgetId('');
+    setNotice(_('Login removed from this device; the account stays on the server.'));
+  };
+
   return (
     <form id='auth-sign-in' method='post' onSubmit={handleSubmit} className='w-full space-y-4'>
+      {connections.length > 0 && (
+        <div className='eink-bordered rounded-lg px-3 py-2 text-sm'>
+          <div className='flex items-center justify-between'>
+            <span className='font-medium'>
+              {_('Remembered logins')} ({connections.length})
+            </span>
+            <button
+              type='button'
+              className='link text-xs'
+              onClick={() => {
+                setConfirmForgetId('');
+                setManaging((m) => !m);
+              }}
+            >
+              {managing ? _('Done') : _('Manage')}
+            </button>
+          </div>
+          <div className='mt-1.5 space-y-1.5'>
+            {connections.map((conn) => (
+              <div key={conn.id} className='flex items-center justify-between gap-2'>
+                <button
+                  type='button'
+                  className='link truncate text-left text-xs'
+                  title={conn.serverUrl}
+                  onClick={() => applyConnection(conn)}
+                >
+                  {getActiveConnectionId() === conn.id ? '● ' : ''}
+                  {conn.email} · {conn.serverUrl.replace(/^https?:\/\//, '')}
+                  {isDeviceIdShape(conn.email) ? ` [${_('Device')}]` : ''}
+                </button>
+                {managing && (
+                  <div className='flex shrink-0 items-center gap-1'>
+                    <select
+                      className='select select-bordered select-xs'
+                      value={conn.mode}
+                      onChange={(e) => updateConnectionMode(conn, e.target.value as ConnectionMode)}
+                      aria-label={_('Transfer mode')}
+                    >
+                      <option value='full'>{_('Full (with files)')}</option>
+                      <option value='metadata'>{_('Metadata only')}</option>
+                    </select>
+                    {confirmForgetId === conn.id ? (
+                      <button
+                        type='button'
+                        className='btn btn-error btn-xs rounded-lg'
+                        onClick={() => forgetConnection(conn.id)}
+                      >
+                        {_('Confirm forget')}
+                      </button>
+                    ) : (
+                      <button
+                        type='button'
+                        className='btn btn-ghost btn-xs rounded-lg'
+                        onClick={() => setConfirmForgetId(conn.id)}
+                      >
+                        {_('Forget')}
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          {managing && (
+            <div className='text-neutral-content/70 mt-1.5 text-xs leading-relaxed'>
+              {_('Metadata-only connections skip book file transfers (covers excepted).')}
+            </div>
+          )}
+        </div>
+      )}
+
       <div className='flex flex-col'>
         <label
           className='flex select-none items-center justify-between px-1 py-2'
@@ -272,6 +415,11 @@ export default function SelfhostedAuthForm({ onSelfhostedLogin }: SelfhostedAuth
               // type='text' (not 'email'): the server accepts any account
               // identifier, and native browser validation would block plain
               // usernames. name/id stay 'email' — that is the API field name.
+              // Uncontrolled with a keyed defaultValue: a remembered-login
+              // chip remounts it prefilled, and password managers still own
+              // the field.
+              key={`email-${preset.email}`}
+              defaultValue={preset.email}
               type='text'
               required
               placeholder={_('Account or email')}
@@ -293,7 +441,10 @@ export default function SelfhostedAuthForm({ onSelfhostedLogin }: SelfhostedAuth
               name='password'
               type='password'
               // Self-hosted accounts may be passwordless: the field stays optional.
+              // Keyed defaultValue pairs with the email input's chip prefill.
               required={false}
+              key={`password-${preset.password}`}
+              defaultValue={preset.password}
               placeholder={_('Your password')}
               autoComplete='current-password'
               className='input eink-bordered w-full rounded-lg placeholder:text-sm'

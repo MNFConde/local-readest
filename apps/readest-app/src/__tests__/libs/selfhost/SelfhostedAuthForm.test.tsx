@@ -1,9 +1,11 @@
 /**
- * SelfhostedAuthForm — ⑪-P1 device-identity mode on the self-hosted sign-in
- * screen. Contract: generate → save → sign in passes (id, key) through
- * selfhostedLogin and saveCredentials; import normalizes and persists;
- * a 401 in device mode names ALLOW_AUTO_PROVISION instead of the generic
- * wrong-password message.
+ * SelfhostedAuthForm — ⑪-P1 device-identity mode and ⑪-P2 remembered-logins
+ * on the self-hosted sign-in screen. Contract: generate → save → sign in
+ * passes (id, key) through selfhostedLogin and saveCredentials; import
+ * normalizes and persists; a 401 in device mode names ALLOW_AUTO_PROVISION
+ * instead of the generic wrong-password message. Remembered logins render as
+ * chips that prefill the form; a connection switch resets the previous
+ * connection's sync cursors + persisted transfer queue and hard-reloads.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
@@ -12,6 +14,17 @@ const { selfhostedLogin, jwtToUser, saveCredentials } = vi.hoisted(() => ({
   selfhostedLogin: vi.fn(),
   jwtToUser: vi.fn(),
   saveCredentials: vi.fn(),
+}));
+
+const connectionsMocks = vi.hoisted(() => ({
+  upsertConnectionOnLogin: vi.fn(),
+  listConnections: vi.fn(),
+  removeConnection: vi.fn(),
+  setConnectionMode: vi.fn(),
+  resetSyncCursorsForSwitch: vi.fn(),
+  clearPersistedTransferQueue: vi.fn(),
+  reloadForConnectionSwitch: vi.fn(),
+  getActiveConnectionId: vi.fn(),
 }));
 
 vi.mock('@/hooks/useTranslation', () => ({
@@ -31,6 +44,8 @@ vi.mock('@/services/selfhostedServerUrl', () => ({
   saveSelfhostedServerUrl: vi.fn(),
 }));
 
+vi.mock('@/libs/selfhost/connections', () => connectionsMocks);
+
 import SelfhostedAuthForm from '@/libs/selfhost/SelfhostedAuthForm';
 import { getDeviceIdentity } from '@/libs/selfhost/deviceIdentity';
 
@@ -43,6 +58,19 @@ describe('SelfhostedAuthForm device mode', () => {
     selfhostedLogin.mockReset().mockResolvedValue({ access_token: 'jwt' });
     jwtToUser.mockReset().mockReturnValue({ id: 'u1' });
     saveCredentials.mockReset();
+    // Defaults that keep ⑪-P1 scenarios free of remembered-login UI and of
+    // switch semantics: empty list, same-connection login.
+    connectionsMocks.listConnections.mockReset().mockReturnValue([]);
+    connectionsMocks.getActiveConnectionId.mockReset().mockReturnValue('');
+    connectionsMocks.upsertConnectionOnLogin.mockReset().mockReturnValue({
+      connection: { id: 'http://127.0.0.1:8080|a@b.c', switched: false },
+      switched: false,
+    });
+    connectionsMocks.removeConnection.mockReset();
+    connectionsMocks.setConnectionMode.mockReset();
+    connectionsMocks.resetSyncCursorsForSwitch.mockReset().mockResolvedValue(undefined);
+    connectionsMocks.clearPersistedTransferQueue.mockReset();
+    connectionsMocks.reloadForConnectionSwitch.mockReset();
   });
   afterEach(() => {
     cleanup();
@@ -140,5 +168,134 @@ describe('SelfhostedAuthForm device mode', () => {
     ).toBeTruthy();
     expect(getDeviceIdentity()).toBeNull();
     expect(screen.getByText('Generate a new device identity')).toBeTruthy();
+  });
+});
+
+describe('SelfhostedAuthForm remembered logins (⑪-P2)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    selfhostedLogin.mockReset().mockResolvedValue({ access_token: 'jwt' });
+    jwtToUser.mockReset().mockReturnValue({ id: 'u1' });
+    saveCredentials.mockReset();
+    connectionsMocks.listConnections.mockReset().mockReturnValue([]);
+    connectionsMocks.getActiveConnectionId.mockReset().mockReturnValue('');
+    connectionsMocks.upsertConnectionOnLogin.mockReset().mockReturnValue({
+      connection: { id: 'x', switched: false },
+      switched: false,
+    });
+    connectionsMocks.removeConnection.mockReset();
+    connectionsMocks.setConnectionMode.mockReset();
+    connectionsMocks.resetSyncCursorsForSwitch.mockReset().mockResolvedValue(undefined);
+    connectionsMocks.clearPersistedTransferQueue.mockReset();
+    connectionsMocks.reloadForConnectionSwitch.mockReset();
+  });
+  afterEach(() => {
+    cleanup();
+    localStorage.clear();
+  });
+
+  const ACCOUNT_CONN = {
+    id: 'http://10.0.0.2:8080|alice@home',
+    serverUrl: 'http://10.0.0.2:8080',
+    email: 'alice@home',
+    password: 'pw-alice',
+    mode: 'full' as const,
+    updatedAt: 1,
+  };
+  const DEVICE_CONN = {
+    id: 'http://10.0.0.3:8080|01234567-89ab-4cde-8f01-23456789abcd',
+    serverUrl: 'http://10.0.0.3:8080',
+    email: VALID_ID,
+    password: VALID_KEY,
+    mode: 'metadata' as const,
+    updatedAt: 2,
+  };
+
+  it('renders no remembered-logins block when the list is empty', () => {
+    render(<SelfhostedAuthForm />);
+    expect(screen.queryByText(/Remembered logins/)).toBeNull();
+  });
+
+  it('a remembered account chip prefills server, account and password', () => {
+    connectionsMocks.listConnections.mockReturnValue([ACCOUNT_CONN]);
+    render(<SelfhostedAuthForm />);
+
+    fireEvent.click(screen.getByRole('button', { name: /alice@home/ }));
+    expect((screen.getByLabelText('Sync server address') as HTMLInputElement).value).toBe(
+      'http://10.0.0.2:8080',
+    );
+    expect((screen.getByLabelText('Account') as HTMLInputElement).value).toBe('alice@home');
+    expect((screen.getByLabelText('Your Password') as HTMLInputElement).value).toBe('pw-alice');
+    expect(screen.getByText('Sign in')).toBeTruthy(); // stays in account mode
+  });
+
+  it('a remembered device chip switches to device mode instead of prefilling', () => {
+    connectionsMocks.listConnections.mockReturnValue([DEVICE_CONN]);
+    render(<SelfhostedAuthForm />);
+
+    fireEvent.click(screen.getByRole('button', { name: /\[Device\]/ }));
+    // Device logins use this device's stored identity: with none stored the
+    // generate panel shows (no form prefill happened).
+    expect(screen.getByText('Generate a new device identity')).toBeTruthy();
+    expect(screen.queryByLabelText('Account')).toBeNull();
+    expect((screen.getByLabelText('Sync server address') as HTMLInputElement).value).toBe(
+      'http://10.0.0.3:8080',
+    );
+  });
+
+  it('manage mode exposes the transfer-mode select and two-stage forget', () => {
+    connectionsMocks.listConnections.mockReturnValue([ACCOUNT_CONN]);
+    render(<SelfhostedAuthForm />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Manage' }));
+    expect(screen.getByLabelText('Transfer mode')).toBeTruthy();
+    expect(
+      screen.getByText('Metadata-only connections skip book file transfers (covers excepted).'),
+    ).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText('Transfer mode'), { target: { value: 'metadata' } });
+    expect(connectionsMocks.setConnectionMode).toHaveBeenCalledWith(ACCOUNT_CONN.id, 'metadata');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Forget' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm forget' }));
+    expect(connectionsMocks.removeConnection).toHaveBeenCalledWith(ACCOUNT_CONN.id);
+    expect(
+      screen.getByText('Login removed from this device; the account stays on the server.'),
+    ).toBeTruthy();
+  });
+
+  it('a connection switch resets cursors, clears the queue and hard-reloads', async () => {
+    connectionsMocks.upsertConnectionOnLogin.mockReturnValue({
+      connection: { id: 'http://127.0.0.1:8080|bob@b', switched: true },
+      switched: true,
+    });
+    render(<SelfhostedAuthForm />);
+    fireEvent.change(screen.getByLabelText('Sync server address'), {
+      target: { value: 'http://127.0.0.1:8080' },
+    });
+    fireEvent.change(screen.getByLabelText('Account'), { target: { value: 'bob@b' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+
+    await waitFor(() => expect(saveCredentials).toHaveBeenCalled());
+    expect(connectionsMocks.upsertConnectionOnLogin).toHaveBeenCalledWith(
+      'http://127.0.0.1:8080',
+      'bob@b',
+      '',
+    );
+    expect(connectionsMocks.resetSyncCursorsForSwitch).toHaveBeenCalledTimes(1);
+    expect(connectionsMocks.clearPersistedTransferQueue).toHaveBeenCalledTimes(1);
+    expect(connectionsMocks.reloadForConnectionSwitch).toHaveBeenCalledTimes(1);
+    expect(connectionsMocks.reloadForConnectionSwitch).toHaveBeenCalledWith(null);
+  });
+
+  it('same-connection login keeps the SPA path (no reset, no reload)', async () => {
+    render(<SelfhostedAuthForm />);
+    fireEvent.change(screen.getByLabelText('Account'), { target: { value: 'a@b.c' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+
+    await waitFor(() => expect(saveCredentials).toHaveBeenCalledWith('a@b.c', ''));
+    expect(connectionsMocks.resetSyncCursorsForSwitch).not.toHaveBeenCalled();
+    expect(connectionsMocks.clearPersistedTransferQueue).not.toHaveBeenCalled();
+    expect(connectionsMocks.reloadForConnectionSwitch).not.toHaveBeenCalled();
   });
 });

@@ -160,5 +160,17 @@
   "Sign in with this identity": "Sign in with this identity",
   "Forget this identity on this device": "Forget this identity on this device",
   "Forget": "Forget",
-  "Cancel": "Cancel"
+  "Cancel": "Cancel",
+  "Remembered logins": "Remembered logins",
+  "Manage": "Manage",
+  "Done": "Done",
+  "Device": "Device",
+  "Transfer mode": "Transfer mode",
+  "Full (with files)": "Full (with files)",
+  "Metadata only": "Metadata only",
+  "Confirm forget": "Confirm forget",
+  "Login removed from this device; the account stays on the server.": "Login removed from this device; the account stays on the server.",
+  "Metadata-only connections skip book file transfers (covers excepted).": "Metadata-only connections skip book file transfers (covers excepted).",
+  "Metadata-only connection skips book file uploads ({{title}})": "Metadata-only connection skips book file uploads ({{title}})",
+  "Metadata-only connection skips book file downloads ({{title}})": "Metadata-only connection skips book file downloads ({{title}})"
 }
