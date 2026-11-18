@@ -84,6 +84,7 @@ pub fn add_user(
     email: &str,
     code: Option<String>,
     role: &str,
+    kind: &str,
 ) -> anyhow::Result<NewUser> {
     // None generates a random secret; Some("") creates a passwordless account
     // (login needs only the email — the server warns about these at startup).
@@ -91,14 +92,15 @@ pub fn add_user(
     let id = random_id();
     let created_at = iso_now();
     conn.execute(
-        "INSERT INTO users (id, email, code_sha256, code_argon2, plan, disabled, role, created_at)
-         VALUES (?1, ?2, ?3, ?4, 'pro', 0, ?5, ?6)",
+        "INSERT INTO users (id, email, code_sha256, code_argon2, plan, disabled, role, kind, created_at)
+         VALUES (?1, ?2, ?3, ?4, 'pro', 0, ?5, ?6, ?7)",
         params![
             id,
             email,
             code_sha256(&code),
             argon2_hash(&code)?,
             role,
+            kind,
             created_at
         ],
     )?;
@@ -166,12 +168,13 @@ pub fn empty_password_emails(conn: &Connection) -> anyhow::Result<Vec<String>> {
     Ok(rows)
 }
 
-/// (email, id, disabled, created_at, role)
-pub type UserRow = (String, String, bool, String, String);
+/// (email, id, disabled, created_at, role, kind)
+pub type UserRow = (String, String, bool, String, String, String);
 
 pub fn list_users(conn: &Connection) -> anyhow::Result<Vec<UserRow>> {
-    let mut stmt = conn
-        .prepare("SELECT email, id, disabled, created_at, role FROM users ORDER BY created_at")?;
+    let mut stmt = conn.prepare(
+        "SELECT email, id, disabled, created_at, role, kind FROM users ORDER BY created_at",
+    )?;
     let rows = stmt
         .query_map([], |r| {
             Ok((
@@ -180,6 +183,7 @@ pub fn list_users(conn: &Connection) -> anyhow::Result<Vec<UserRow>> {
                 r.get::<_, i64>(2)? != 0,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -247,10 +251,17 @@ fn iso_now() -> String {
 }
 
 /// Pretty-print a user list row for the CLI.
-pub fn format_user_row(row: &(String, String, bool, String, String)) -> impl fmt::Display {
-    let (email, id, disabled, created, role) = row;
+pub fn format_user_row(row: &UserRow) -> impl fmt::Display {
+    let (email, id, disabled, created, role, kind) = row;
+    // Device accounts (⑪-P1) are the surprising kind — always mark them;
+    // person accounts keep the historical output untouched.
+    let kind_note = if kind == "device" {
+        "  kind=device"
+    } else {
+        ""
+    };
     format!(
-        "{email:<32} {id}  {}  role={role}  created_unix={created}",
+        "{email:<32} {id}  {}  role={role}  created_unix={created}{kind_note}",
         if *disabled { "DISABLED" } else { "active" }
     )
 }
@@ -259,12 +270,58 @@ pub fn format_user_row(row: &(String, String, bool, String, String)) -> impl fmt
 #[allow(dead_code)]
 pub fn ensure_user(conn: &Connection, email: &str, code: &str) -> anyhow::Result<()> {
     if verify_login(conn, code)?.is_none() {
-        add_user(conn, email, Some(code.to_string()), "user")?;
+        add_user(conn, email, Some(code.to_string()), "user", "person")?;
     }
     Ok(())
 }
 
 #[allow(dead_code)]
-pub fn user_json(row: &(String, String, bool, String, String)) -> serde_json::Value {
-    json!({ "email": row.0, "id": row.1, "disabled": row.2, "created_at": row.3, "role": row.4 })
+pub fn user_json(row: &UserRow) -> serde_json::Value {
+    json!({ "email": row.0, "id": row.1, "disabled": row.2, "created_at": row.3, "role": row.4, "kind": row.5 })
+}
+
+/// True when the email is already registered. The auto-provision path (⑪-P1)
+/// needs this because `verify_login_email` merges "unknown email" and "wrong
+/// password" into one None — only the former may create an account.
+pub fn email_exists(conn: &Connection, email: &str) -> anyhow::Result<bool> {
+    let found: Option<String> = conn
+        .query_row(
+            "SELECT email FROM users WHERE email = ?1",
+            params![email],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
+}
+
+/// A user's account kind ("person" or "device"); None = unknown id.
+pub fn kind_of(conn: &Connection, id: &str) -> anyhow::Result<Option<String>> {
+    conn.query_row("SELECT kind FROM users WHERE id = ?1", params![id], |r| {
+        r.get(0)
+    })
+    .optional()
+    .map_err(Into::into)
+}
+
+/// ⑪-P1: create a `kind='device'` account for a first-time UUID-shaped login,
+/// then re-verify through the normal login path. An email collision is not an
+/// error: it means either that the caller got a real account's password wrong
+/// (the re-verify below then fails it as a plain 401) or that a concurrent
+/// first login created the account a moment earlier (the re-verify succeeds —
+/// idempotent retry). Any other INSERT failure is a genuine server error.
+pub fn provision_device_user(
+    conn: &Connection,
+    email: &str,
+    secret: &str,
+) -> anyhow::Result<Option<User>> {
+    if let Err(e) = add_user(conn, email, Some(secret.to_string()), "user", "device") {
+        let duplicate = e
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(rusqlite::Error::sqlite_error_code)
+            == Some(rusqlite::ErrorCode::ConstraintViolation);
+        if !duplicate {
+            return Err(e);
+        }
+    }
+    verify_login_email(conn, email, secret)
 }

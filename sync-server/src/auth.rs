@@ -91,6 +91,12 @@ impl FromRequestParts<SharedState> for ClientIp {
 /// email-less password (the code *is* the password — same column pair), so old
 /// clients keep logging in without migration.
 ///
+/// ⑪-P1 device identity: when `ALLOW_AUTO_PROVISION` is on, a login whose
+/// email is a well-formed UUID and whose secret is >=16 chars creates its own
+/// `kind='device'` account on first use (idempotent afterwards). Anything
+/// else — non-UUID emails, short secrets, the flag being off — keeps failing
+/// with the plain 401 and never creates a row.
+///
 /// Responses are written verbatim from the contract (the login endpoint's
 /// 400/401 bodies have no `code` field — keep it that way).
 pub async fn login(
@@ -131,6 +137,15 @@ pub async fn login(
         .and_then(|v| v.get("password").or_else(|| v.get("code")))
         .and_then(|c| c.as_str())
         .map(str::to_string);
+    // ⑪-P1 candidate data for device-identity first login. Kept out of the
+    // dispatch below; only consulted in the Ok(None) arm and only when
+    // ALLOW_AUTO_PROVISION is on.
+    let provision = match (&email, &secret) {
+        (Some(email), Some(secret)) if is_uuid_email(email) && secret.len() >= 16 => {
+            Some((email.clone(), secret.clone()))
+        }
+        _ => None,
+    };
     let verified = match (email, secret) {
         (Some(email), Some(secret)) => crate::routes::with_db(&state, |conn| {
             users::verify_login_email(conn, &email, &secret).map_err(crate::error::ApiError::server)
@@ -149,46 +164,91 @@ pub async fn login(
         }
     };
     match verified {
-        Ok(Some(user)) => {
-            state
-                .login_limiter
-                .lock()
-                .expect("login limiter mutex poisoned")
-                .record_success(&identity);
-            // Activity stamp for the admin users list; best-effort.
-            let _ = crate::routes::with_db(&state, |conn| {
-                users::touch_last_seen(conn, &user.id, users::now_unix())
-                    .map_err(crate::error::ApiError::server)
-            });
-            match jwt::issue(
-                &state.cfg.jwt_secret,
-                &user.id,
-                Some(&user.email),
-                &user.plan,
-                Some(&user.role),
-            ) {
-                Ok(token) => (
-                    StatusCode::OK,
-                    Json(json!({ "access_token": token, "token_type": "bearer" })),
-                )
-                    .into_response(),
+        Ok(Some(user)) => login_granted(&state, &identity, user),
+        Ok(None) => {
+            // First-time device identity (⑪-P1): with the flag on, a
+            // UUID-shaped email with a sufficiently long secret provisions
+            // its own account and logs in like any other user. Everything
+            // else keeps failing as a plain 401 — including a UUID login
+            // with a wrong key against an existing account (the INSERT then
+            // collides and re-verification rejects it).
+            let provisioned = match provision {
+                Some((ref email, ref secret)) if state.cfg.allow_auto_provision => {
+                    crate::routes::with_db(&state, |conn| {
+                        users::provision_device_user(conn, email, secret)
+                            .map_err(crate::error::ApiError::server)
+                    })
+                }
+                _ => Ok(None),
+            };
+            match provisioned {
+                Ok(Some(user)) => login_granted(&state, &identity, user),
+                Ok(None) => {
+                    state
+                        .login_limiter
+                        .lock()
+                        .expect("login limiter mutex poisoned")
+                        .record_failure(&identity);
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        Json(json!({ "error": "invalid code" })),
+                    )
+                        .into_response()
+                }
                 Err(_) => internal_error_response(),
             }
         }
-        Ok(None) => {
-            state
-                .login_limiter
-                .lock()
-                .expect("login limiter mutex poisoned")
-                .record_failure(&identity);
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({ "error": "invalid code" })),
-            )
-                .into_response()
-        }
         Err(_) => internal_error_response(),
     }
+}
+
+/// Shared tail of every successful login: clear the limiter, stamp activity,
+/// issue the JWT. Kept in one place so the auto-provision path (⑪-P1) is
+/// behaviorally identical to a plain login.
+fn login_granted(state: &SharedState, identity: &RequestIdentity, user: users::User) -> Response {
+    state
+        .login_limiter
+        .lock()
+        .expect("login limiter mutex poisoned")
+        .record_success(identity);
+    // Activity stamp for the admin users list; best-effort.
+    let _ = crate::routes::with_db(state, |conn| {
+        users::touch_last_seen(conn, &user.id, users::now_unix())
+            .map_err(crate::error::ApiError::server)
+    });
+    match jwt::issue(
+        &state.cfg.jwt_secret,
+        &user.id,
+        Some(&user.email),
+        &user.plan,
+        Some(&user.role),
+    ) {
+        Ok(token) => (
+            StatusCode::OK,
+            Json(json!({ "access_token": token, "token_type": "bearer" })),
+        )
+            .into_response(),
+        Err(_) => internal_error_response(),
+    }
+}
+
+/// Strict UUID shape (8-4-4-4-12 hex, either case) — what clients generate
+/// with `crypto.randomUUID()`. No real person's email matches, so turning on
+/// ALLOW_AUTO_PROVISION can never silently become open registration.
+fn is_uuid_email(email: &str) -> bool {
+    let is_hex = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit());
+    let parts: Vec<&str> = email.split('-').collect();
+    parts.len() == 5
+        && is_hex(parts[0])
+        && parts[0].len() == 8
+        && is_hex(parts[1])
+        && parts[1].len() == 4
+        && is_hex(parts[2])
+        && parts[2].len() == 4
+        && is_hex(parts[3])
+        && parts[3].len() == 4
+        && is_hex(parts[4])
+        && parts[4].len() == 12
 }
 
 fn locked_response(wait: std::time::Duration) -> Response {

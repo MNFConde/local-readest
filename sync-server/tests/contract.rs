@@ -25,6 +25,7 @@ pub fn test_config(tag: &str) -> Config {
         max_body_bytes: 512 * 1024 * 1024,
         library_shared: true,
         admin_token: None,
+        allow_auto_provision: false,
         deepl_api_key: None,
         deepl_endpoint: None,
     }
@@ -310,8 +311,14 @@ async fn passwordless_account_needs_only_email() {
     let state = test_state(test_config("login-empty-pw"));
     {
         let conn = state.db.lock().unwrap();
-        sync_server::users::add_user(&conn, "free@example.com", Some(String::new()), "user")
-            .unwrap();
+        sync_server::users::add_user(
+            &conn,
+            "free@example.com",
+            Some(String::new()),
+            "user",
+            "person",
+        )
+        .unwrap();
         sync_server::users::ensure_user(&conn, "guard@example.com", "code-guard-123").unwrap();
         // Startup-warning source lists exactly the passwordless accounts.
         assert_eq!(
@@ -907,6 +914,7 @@ async fn storage_quota_enforced_on_blob_put() {
         max_body_bytes: 512 * 1024 * 1024,
         library_shared: true,
         admin_token: None,
+        allow_auto_provision: false,
         deepl_api_key: None,
         deepl_endpoint: None,
     };
@@ -939,6 +947,7 @@ async fn storage_blob_accepts_bodies_over_axum_default_limit() {
         max_body_bytes: 512 * 1024 * 1024,
         library_shared: true,
         admin_token: None,
+        allow_auto_provision: false,
         deepl_api_key: None,
         deepl_endpoint: None,
     };
@@ -1423,10 +1432,22 @@ async fn admin_auth_dual_track_jwt_and_operator_token() {
     let state = test_state(cfg);
     {
         let conn = state.db.lock().unwrap();
-        sync_server::users::add_user(&conn, "root@t.test", Some("root-pw-123".into()), "admin")
-            .unwrap();
-        sync_server::users::add_user(&conn, "plain@t.test", Some("plain-pw-123".into()), "user")
-            .unwrap();
+        sync_server::users::add_user(
+            &conn,
+            "root@t.test",
+            Some("root-pw-123".into()),
+            "admin",
+            "person",
+        )
+        .unwrap();
+        sync_server::users::add_user(
+            &conn,
+            "plain@t.test",
+            Some("plain-pw-123".into()),
+            "user",
+            "person",
+        )
+        .unwrap();
     }
     let app = routes::router(state.clone());
     let (status, _, _) = admin_request(app.clone(), "GET", "/api/admin/books", None, None).await;
@@ -2291,7 +2312,7 @@ async fn admin_stats_counts_sizes_and_auth() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body["users"],
-        json!({ "total": 2, "admins": 1, "disabled": 0 })
+        json!({ "total": 2, "admins": 1, "disabled": 0, "devices": 0 })
     );
     assert_eq!(
         body["books"],
@@ -3392,4 +3413,228 @@ async fn delete_user_cascades_pushes_both_sides() {
     .await;
     // Recipient no longer exists now.
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ── device identity auto-provisioning (⑪-P1) ──────────────────────────────
+
+const DEVICE_EMAIL: &str = "a1b2c3d4-e5f6-4a3b-8c9d-0e1f2a3b4c5d";
+const DEVICE_KEY: &str = "device-key-0123456789abcdef";
+
+fn provision_config(tag: &str) -> Config {
+    let mut cfg = test_config(tag);
+    cfg.allow_auto_provision = true;
+    cfg
+}
+
+async fn device_login(
+    app: axum::Router,
+    email: &str,
+    key: &str,
+) -> (StatusCode, Value, axum::http::HeaderMap) {
+    request_with_headers(
+        app,
+        "POST",
+        "/api/auth",
+        None,
+        Some(json!({ "email": email, "password": key })),
+        &[("X-Device-Id", "device-login")],
+    )
+    .await
+}
+
+fn user_count(state: &SharedState) -> i64 {
+    let conn = state.db.lock().unwrap();
+    conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn auto_provision_off_unknown_login_fails_and_creates_nothing() {
+    let state = test_state(test_config("prov-off"));
+    let app = routes::router(state.clone());
+    let (status, body, _) = device_login(app, DEVICE_EMAIL, DEVICE_KEY).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
+    assert_eq!(body, json!({ "error": "invalid code" }));
+    assert_eq!(user_count(&state), 0, "no account may be created");
+}
+
+#[tokio::test]
+async fn auto_provision_creates_device_account_idempotently() {
+    let state = test_state(provision_config("prov-on"));
+    let app = routes::router(state.clone());
+
+    let (status, body, _) = device_login(app.clone(), DEVICE_EMAIL, DEVICE_KEY).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["token_type"], "bearer");
+    let token = body["access_token"].as_str().expect("access_token");
+    let claims = sync_server::jwt::verify("test-secret-0123456789abcdef", token).unwrap();
+    let uid = claims.sub.to_string();
+    assert_eq!(claims.email.as_deref(), Some(DEVICE_EMAIL));
+
+    {
+        let conn = state.db.lock().unwrap();
+        let (kind, role, plan): (String, String, String) = conn
+            .query_row(
+                "SELECT kind, role, plan FROM users WHERE id = ?1",
+                [&uid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (kind.as_str(), role.as_str(), plan.as_str()),
+            ("device", "user", "pro")
+        );
+    }
+    assert_eq!(user_count(&state), 1);
+
+    // Second login with the same pair: plain success, still one row.
+    let (status, body, _) = device_login(app, DEVICE_EMAIL, DEVICE_KEY).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let token2 = body["access_token"].as_str().expect("access_token 2");
+    let claims2 = sync_server::jwt::verify("test-secret-0123456789abcdef", token2).unwrap();
+    assert_eq!(claims2.sub, uid, "same identity, same account");
+    assert_eq!(user_count(&state), 1, "idempotent: no duplicate rows");
+}
+
+#[tokio::test]
+async fn auto_provision_wrong_key_is_unauthorized_not_new_account() {
+    let state = test_state(provision_config("prov-wrong"));
+    let app = routes::router(state.clone());
+    let (status, _, _) = device_login(app.clone(), DEVICE_EMAIL, DEVICE_KEY).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body, _) = device_login(app, DEVICE_EMAIL, "another-key-0123456789abcdef").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
+    assert_eq!(body, json!({ "error": "invalid code" }));
+    assert_eq!(user_count(&state), 1, "no shadow account for the wrong key");
+}
+
+#[tokio::test]
+async fn auto_provision_requires_uuid_email_and_long_key() {
+    let state = test_state(provision_config("prov-gate"));
+    let app = routes::router(state.clone());
+
+    // A person-shaped email never self-registers, even with the flag on.
+    let (status, _, _) = device_login(app.clone(), "alice@example.com", DEVICE_KEY).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // A UUID email with a too-short secret is refused as well.
+    let (status, _, _) = device_login(app.clone(), DEVICE_EMAIL, "short").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // UUID-ish but malformed (bad group lengths) stays out.
+    let (status, _, _) = device_login(app.clone(), "abcd-efgh-ijkl", DEVICE_KEY).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(user_count(&state), 0, "nothing may be provisioned");
+}
+
+#[tokio::test]
+async fn provisioned_device_account_gets_full_isolation() {
+    let state = test_state(provision_config("prov-iso"));
+    let app = routes::router(state.clone());
+    let (status, body, _) = device_login(app.clone(), DEVICE_EMAIL, DEVICE_KEY).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let token = body["access_token"].as_str().unwrap().to_string();
+    let uid = {
+        let claims = sync_server::jwt::verify("test-secret-0123456789abcdef", &token).unwrap();
+        claims.sub.to_string()
+    };
+
+    // Upload into its own namespace and pull its own (empty) book list.
+    let (s, _, _) = put_blob(
+        app.clone(),
+        &token,
+        &format!("{uid}/Readest/Books/dev-hash-x/book.epub"),
+        b"device book".to_vec(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "device account uploads work");
+    let (status, body, _) = request(
+        app,
+        "GET",
+        "/api/sync?since=0&type=books",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["books"].as_array().map(Vec::len), Some(0));
+}
+
+#[tokio::test]
+async fn push_rejects_device_accounts_on_both_sides() {
+    let state = test_state(provision_config("prov-push"));
+    let uid_a = seed_user(&state, "pd-a@x.com", "code-pd-a1");
+    seed_book_with_ts(&state, &uid_a, "hashPD1", "Person Book", None).await;
+    let app = routes::router(state.clone());
+
+    // Provision the device identity.
+    let (status, body, _) = device_login(app.clone(), DEVICE_EMAIL, DEVICE_KEY).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let device_token = body["access_token"].as_str().unwrap().to_string();
+    let uid_d = {
+        let claims =
+            sync_server::jwt::verify("test-secret-0123456789abcdef", &device_token).unwrap();
+        claims.sub.to_string()
+    };
+
+    // Person → device: refused (recommendations target real people).
+    let token_a = token_for(&state, &uid_a);
+    let (status, body, _) = post_push(
+        app.clone(),
+        &token_a,
+        json!({ "to": DEVICE_EMAIL, "bookHash": "hashPD1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(body["error"], "cannot push to a device account");
+
+    // Device → person: also refused. The device needs its own seeded book so
+    // the request passes the file gate and reaches the sender-kind check.
+    seed_book_with_ts(&state, &uid_d, "hashPD2", "Device Book", None).await;
+    let (status, body, _) = post_push(
+        app,
+        &device_token,
+        json!({ "to": "pd-a@x.com", "bookHash": "hashPD2" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(body["error"], "device accounts cannot push books");
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn admin_users_and_stats_expose_device_kind() {
+    let state = test_state(provision_config("prov-admin"));
+    seed_user(&state, "pa-person@x.com", "code-pd-person");
+    let app = routes::router(state.clone());
+    let (status, body, _) = device_login(app.clone(), DEVICE_EMAIL, DEVICE_KEY).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let admin_token = sync_server::jwt::issue(
+        &state.cfg.jwt_secret,
+        "nobody",
+        Some("admin@t.test"),
+        "pro",
+        Some("admin"),
+    )
+    .unwrap();
+    let tok = Some(admin_token.as_str());
+
+    let (status, body, _) = admin_request(app.clone(), "GET", "/api/admin/users", tok, None).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let users = body["users"].as_array().expect("users array");
+    assert_eq!(users.len(), 2);
+    let kinds: Vec<&str> = users
+        .iter()
+        .map(|u| u["kind"].as_str().expect("kind field"))
+        .collect();
+    assert!(kinds.contains(&"person"), "kinds: {kinds:?}");
+    assert!(kinds.contains(&"device"), "kinds: {kinds:?}");
+
+    let (status, body, _) = admin_request(app, "GET", "/api/admin/stats", tok, None).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["users"]["total"], 2);
+    assert_eq!(
+        body["users"]["devices"], 1,
+        "device count surfaces in stats"
+    );
 }

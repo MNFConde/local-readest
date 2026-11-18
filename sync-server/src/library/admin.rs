@@ -384,7 +384,7 @@ async fn list_users(
         .map_err(|_| super::admin_error("db lock poisoned"))?;
     let rows = crate::users::list_users(&conn).map_err(super::admin_error)?;
     // Activity stamps live in their own column (users::list_users keeps its
-    // CLI-facing 5-tuple shape), and per-user storage is one walk over
+    // CLI-facing 6-tuple shape), and per-user storage is one walk over
     // files_root grouped by the leading uid path segment — full size per
     // copy, the same semantics as the quota walk.
     let mut stmt = conn
@@ -407,13 +407,14 @@ async fn list_users(
     }
     let users: Vec<Value> = rows
         .iter()
-        .map(|(email, id, disabled, created, role)| {
+        .map(|(email, id, disabled, created, role, kind)| {
             json!({
                 "email": email,
                 "id": id,
                 "disabled": disabled,
                 "createdAt": created,
                 "role": role,
+                "kind": kind,
                 "bytesUsed": used.get(id.as_str()).copied().unwrap_or(0),
                 "lastSeenAt": last_seen.get(id.as_str()).copied().flatten(),
             })
@@ -473,8 +474,8 @@ async fn create_user(
         )
             .into_response());
     }
-    let created =
-        crate::users::add_user(&conn, &email, password, &role).map_err(super::admin_error)?;
+    let created = crate::users::add_user(&conn, &email, password, &role, "person")
+        .map_err(super::admin_error)?;
     Ok(Json(json!({
         "email": created.email,
         // Returned exactly once; the UI must show it before it can't be recovered.
@@ -904,16 +905,22 @@ async fn get_stats(
 ) -> Result<Response, Response> {
     require_admin(&state, &headers).await?;
 
-    let ((users_total, users_admins, users_disabled), books_synced, catalog_books, works) = {
+    let (
+        (users_total, users_admins, users_disabled, users_devices),
+        books_synced,
+        catalog_books,
+        works,
+    ) = {
         let conn = state
             .db
             .lock()
             .map_err(|_| super::admin_error("db lock poisoned"))?;
-        let (t, a, d) = conn
+        let (t, a, d, dv) = conn
             .query_row(
                 "SELECT COUNT(*),
                         COALESCE(SUM(role = 'admin'), 0),
-                        COALESCE(SUM(disabled), 0)
+                        COALESCE(SUM(disabled), 0),
+                        COALESCE(SUM(kind = 'device'), 0)
                  FROM users",
                 [],
                 |r| {
@@ -921,6 +928,7 @@ async fn get_stats(
                         r.get::<_, i64>(0)?,
                         r.get::<_, i64>(1)?,
                         r.get::<_, i64>(2)?,
+                        r.get::<_, i64>(3)?,
                     ))
                 },
             )
@@ -932,7 +940,7 @@ async fn get_stats(
             .map_err(super::admin_error)?;
         let catalog = one("SELECT COUNT(*) FROM catalog_books").map_err(super::admin_error)?;
         let works = one("SELECT COUNT(*) FROM works").map_err(super::admin_error)?;
-        ((t, a, d), synced, catalog, works)
+        ((t, a, d, dv), synced, catalog, works)
     };
 
     let mut files = Vec::new();
@@ -969,6 +977,7 @@ async fn get_stats(
             "total": users_total,
             "admins": users_admins,
             "disabled": users_disabled,
+            "devices": users_devices,
         },
         "books": {
             "synced": books_synced,

@@ -48,6 +48,7 @@
 </div>
 
 <h2>用户</h2>
+<label class="muted"><input type="checkbox" id="hide-devices" onchange="loadUsers()"> 隐藏设备号（kind=device 的自注册身份）</label>
 <table id="users"><thead><tr><th>邮箱</th><th>id</th><th>状态</th><th>创建时间</th><th></th></tr></thead><tbody></tbody></table>
 <div class="muted">建用户 / 重置登录码请用 CLI：sync-server add-user / passwd。</div>
 
@@ -108,8 +109,11 @@ async function createWork() {
 }
 async function loadUsers() {
   const data = await api('/users');
-  $('users').tBodies[0].innerHTML = data.users.map(u =>
-    `<tr><td>${esc(u.email)}</td><td class="muted">${esc(u.id)}</td>
+  const hideDevices = $('hide-devices').checked;
+  $('users').tBodies[0].innerHTML = data.users
+    .filter(u => !hideDevices || u.kind !== 'device')
+    .map(u =>
+    `<tr><td>${esc(u.email)}${u.kind === 'device' ? ' <span class="muted">[设备]</span>' : ''}</td><td class="muted">${esc(u.id)}</td>
      <td>${u.disabled ? '<span class="err">停用</span>' : '<span class="ok">正常</span>'}</td>
      <td class="muted">${esc(u.createdAt)}</td>
      <td><button onclick="toggleUser('${esc(u.email)}', ${!u.disabled})">${u.disabled ? '启用' : '停用'}</button></td></tr>`).join('');

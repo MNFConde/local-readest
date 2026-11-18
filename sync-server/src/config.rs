@@ -13,6 +13,11 @@ pub struct Config {
     /// Admin API/page bearer token. None disables /api/admin entirely
     /// (safe default) while /admin still renders an explanatory page.
     pub admin_token: Option<String>,
+    /// ROADMAP ⑪-P1: when true, a login whose email is a well-formed UUID
+    /// (and whose secret is >=16 chars) auto-creates a `kind='device'`
+    /// account on first use. Default off — with the flag off, unknown
+    /// credentials keep failing with the plain 401 and nothing is created.
+    pub allow_auto_provision: bool,
     pub deepl_api_key: Option<String>,
     pub deepl_endpoint: Option<String>,
 }
@@ -74,6 +79,8 @@ impl Config {
             .filter(|m| *m > 0)
             .unwrap_or(DEFAULT_MAX_BODY_BYTES);
         let library_shared = !matches!(get("LIBRARY_SHARED").as_deref(), Some("0" | "false"));
+        let allow_auto_provision =
+            matches!(get("ALLOW_AUTO_PROVISION").as_deref(), Some("1" | "true"));
 
         Self {
             listen_addr: normalize_listen_addr(
@@ -85,6 +92,7 @@ impl Config {
             max_body_bytes,
             library_shared,
             admin_token: get("ADMIN_TOKEN").filter(|t| t.len() >= 8),
+            allow_auto_provision,
             deepl_api_key: get("DEEPL_API_KEY"),
             deepl_endpoint: get("DEEPL_ENDPOINT"),
         }

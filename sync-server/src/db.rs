@@ -63,6 +63,11 @@ const SCHEMA: &str = r#"
         plan TEXT NOT NULL DEFAULT 'pro',
         disabled INTEGER NOT NULL DEFAULT 0,
         role TEXT NOT NULL DEFAULT 'user',
+        -- ROADMAP ⑪-P1: "person" = a human-managed account, "device" =
+        -- self-registered device identity (ALLOW_AUTO_PROVISION). Device
+        -- accounts are grouped/hidden in the admin user list and excluded
+        -- from user-to-user pushes (⑬).
+        kind TEXT NOT NULL DEFAULT 'person',
         created_at TEXT NOT NULL,
         last_seen_at INTEGER
     );
@@ -158,6 +163,9 @@ fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
     }
     if !table_has_column(conn, "users", "last_seen_at")? {
         conn.execute_batch("ALTER TABLE users ADD COLUMN last_seen_at INTEGER")?;
+    }
+    if !table_has_column(conn, "users", "kind")? {
+        conn.execute_batch("ALTER TABLE users ADD COLUMN kind TEXT NOT NULL DEFAULT 'person'")?;
     }
     Ok(())
 }

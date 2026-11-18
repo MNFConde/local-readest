@@ -158,22 +158,42 @@ pub async fn create(
     let created = crate::rfc3339::now_rfc3339();
     let (title, push_id) = {
         let conn = state.db.lock().map_err(|_| db_poisoned().into_response())?;
+        // ⑪-P1: pushes are friend-to-friend recommendations — device
+        // identities sit out on both sides. Check the sender first so a
+        // device account gets the same rejection whichever role it plays.
+        let sender_kind: String = conn
+            .query_row(
+                "SELECT kind FROM users WHERE id = ?1",
+                params![from_uid],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| "person".to_string());
+        if sender_kind == "device" {
+            return Err(
+                PushError::Validation("device accounts cannot push books".into()).into_response(),
+            );
+        }
         // Resolve the recipient by the account name (the users.email column
         // is the human handle; login and the admin endpoints match it
         // exactly too).
-        let recipient: Option<(String, i64)> = conn
+        let recipient: Option<(String, i64, String)> = conn
             .query_row(
-                "SELECT id, disabled FROM users WHERE email = ?1",
+                "SELECT id, disabled, kind FROM users WHERE email = ?1",
                 params![to_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .ok();
-        let Some((to_uid, disabled)) = recipient else {
+        let Some((to_uid, disabled, kind)) = recipient else {
             return Err(PushError::NotFound("no such user".into()).into_response());
         };
         if disabled != 0 {
             return Err(
                 PushError::Validation("recipient account is disabled".into()).into_response(),
+            );
+        }
+        if kind == "device" {
+            return Err(
+                PushError::Validation("cannot push to a device account".into()).into_response(),
             );
         }
         if to_uid == from_uid {

@@ -21,9 +21,9 @@ fn main() -> anyhow::Result<()> {
             runtime.block_on(serve(cfg))
         }
         Some("add-user") => {
-            let (email, code, role) = parse_add_user_args(&args)?;
+            let (email, code, role, kind) = parse_add_user_args(&args)?;
             account_op(|conn| {
-                let created = users::add_user(conn, &email, code, &role)?;
+                let created = users::add_user(conn, &email, code, &role, &kind)?;
                 if created.code.is_empty() {
                     println!("created {} (role={role})", created.email);
                     println!("password is EMPTY — anyone knowing the email can log in");
@@ -98,7 +98,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some(other) => {
             eprintln!(
-                "unknown subcommand: {other}\nusage: sync-server [serve | add-user <email> [--password X] [--admin] | set-role <email> <admin|user> | list-users | disable-user <email> | enable-user <email> | passwd <email> [--password X]]"
+                "unknown subcommand: {other}\nusage: sync-server [serve | add-user <email> [--password X] [--admin] [--kind person|device] | set-role <email> <admin|user> | list-users | disable-user <email> | enable-user <email> | passwd <email> [--password X]]"
             );
             std::process::exit(2);
         }
@@ -119,17 +119,39 @@ fn secret_flag(args: &[String]) -> Option<String> {
     }
 }
 
-fn parse_add_user_args(args: &[String]) -> anyhow::Result<(String, Option<String>, String)> {
+fn parse_add_user_args(
+    args: &[String],
+) -> anyhow::Result<(String, Option<String>, String, String)> {
     let email = args
         .get(1)
         .filter(|a| !a.starts_with("--"))
-        .ok_or_else(|| anyhow::anyhow!("usage: add-user <email> [--password X] [--admin]"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "usage: add-user <email> [--password X] [--admin] [--kind person|device]"
+            )
+        })?;
     let role = if args.iter().any(|a| a == "--admin") {
         "admin"
     } else {
         "user"
     };
-    Ok((email.clone(), secret_flag(args), role.to_string()))
+    // ⑪-P1: --kind device creates a device-identity account (admin-page
+    // device group, excluded from user-to-user pushes). Default stays person.
+    let kind = match args.iter().position(|a| a == "--kind") {
+        Some(pos) => match args.get(pos + 1).map(String::as_str) {
+            Some(k @ ("person" | "device")) => k,
+            _ => anyhow::bail!(
+                "usage: add-user <email> [--password X] [--admin] [--kind person|device]"
+            ),
+        },
+        None => "person",
+    };
+    Ok((
+        email.clone(),
+        secret_flag(args),
+        role.to_string(),
+        kind.to_string(),
+    ))
 }
 
 /// Account commands share the server's env/DB but never need JWT_SECRET.
@@ -186,7 +208,7 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::secret_flag;
+    use super::{parse_add_user_args, secret_flag};
 
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
@@ -218,5 +240,31 @@ mod tests {
         );
         // No flag at all: caller generates a random secret.
         assert_eq!(secret_flag(&args(&["add-user", "a@b"])), None);
+    }
+
+    #[test]
+    fn add_user_kind_defaults_to_person_and_validates() {
+        let (email, code, role, kind) = parse_add_user_args(&args(&["add-user", "d@e"])).unwrap();
+        assert_eq!(
+            (
+                email.as_str(),
+                code.as_deref(),
+                role.as_str(),
+                kind.as_str()
+            ),
+            ("d@e", None, "user", "person")
+        );
+        let (_, _, _, kind) = parse_add_user_args(&args(&[
+            "add-user",
+            "d@e",
+            "--kind",
+            "device",
+            "--password",
+            "pw",
+        ]))
+        .unwrap();
+        assert_eq!(kind, "device");
+        assert!(parse_add_user_args(&args(&["add-user", "d@e", "--kind", "alien"])).is_err());
+        assert!(parse_add_user_args(&args(&["add-user", "d@e", "--kind"])).is_err());
     }
 }
