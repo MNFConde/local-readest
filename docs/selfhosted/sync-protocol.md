@@ -35,6 +35,8 @@ JWT（HS256）claims：`sub`（用户标识 = 数据隔离键）、`plan: "pro"`
 
 **本项目偏离（多用户）**：凭据为每用户独立的「账号（邮箱）+ 密码」。历史沿革：曾是每用户独立登录码（服务端随机生成的高熵码），账号+密码模型落地后原码**原样作为密码**使用，零迁移；`add-user --password ""` 可建免密账号（知道邮箱即可登入，服务端启动时警告）。校验流程：SHA-256(secret) 索引 + email 定位用户 → argon2id 复核（允许自设弱密码）→ 签发 `sub=<user_id>`、`email=<用户邮箱>`、`plan=pro`、`role=<users.role>`。**TTL 缩短为 1 小时**：客户端 `AuthContext.refresh` 在过期后用持久化的账号密码静默重登（客户端补丁已实现），无需刷新端点。禁用用户返回 401 `{"error":"invalid code"}`。
 
+**设备身份自动建号（⑪-P1，`ALLOW_AUTO_PROVISION` 开关，缺省关）**：开关开启时，登录凭据同时满足① email 为严格 UUID 形状（8-4-4-4-12 hex，客户端 `crypto.randomUUID()` 的产物；真人邮箱永不匹配，因此开开关不会变成开放注册）② password ≥16 字符 ③ 该 email 尚不存在，则自动创建 `kind='device'` 账号并照常签发 JWT（成功路径与普通登录完全一致：清零限流计数、盖章 last_seen）。重复登录幂等（仍是一个账号）；对已存在账号用错 key 只会得到普通 401，不会建出影子号；被停用的设备号也无法借自动建号复活。开关关闭时，未知凭据一律普通 401，零建号。设备号 key 丢失**无任何找回**（管理员只能按 email 重置密码），客户端登录表单强制先展示备份。数据起点为空档案，不继承旧账号（手动迁移走 §6.8 存档导入）。`kind` 列对既有库由启动迁移自动补齐 `'person'`。
+
 ### 受保护路由的鉴权失败响应
 
 无/坏 Bearer：401 `{"error":"missing token"|"invalid token","code":"AUTH"}`。
@@ -166,7 +168,7 @@ Edge TTS 依赖微软免费接口（websocket 协议）；Rust 实现可用等�
 | `GET /api/admin/works` / `POST /api/admin/works` | 作品列表（含书目数）/ 手工建作品（id=`manual-<hex4>`） |
 | `POST /api/admin/enrich` | 对未归组书目逐本查 Open Library（title+author→work_id）自动归组；逐本容错，返回 `{enriched, failed[]}` |
 | `POST /api/admin/gc` | 触发孤儿 blob GC，返回 `{removed}` |
-| `GET /api/admin/users` | 用户列表（含 `role`、存储用量 `bytesUsed`——`files/<uid>/` 副本全尺寸累计，与配额口径一致；最后活跃 `lastSeenAt` unix 秒，登录与已鉴权同步/存储请求盖章，节流 ≤1 次/分钟，从未活跃为 null） |
+| `GET /api/admin/users` | 用户列表（含 `role`、账号种类 `kind`（`"person"`/`"device"`，⑪-P1）、存储用量 `bytesUsed`——`files/<uid>/` 副本全尺寸累计，与配额口径一致；最后活跃 `lastSeenAt` unix 秒，登录与已鉴权同步/存储请求盖章，节流 ≤1 次/分钟，从未活跃为 null；两处管理页均有「隐藏设备号」口径防匿名号淹没列表） |
 | `POST /api/admin/users` | 建用户：`{"email","password"?,"role"?}`——`password` 缺省=随机生成**并在响应里仅此一次**返回，空串=免密；`role` 缺省 `user`；重复邮箱 409 |
 | `DELETE /api/admin/users/<email>` | 删用户：账号 + 其全部同步数据行 + `files/<uid>/` 一并移除；随后清理无持有者的目录行；删自己的账号 400 |
 | `POST /api/admin/users/<email>/password` | 重置密码：`{"password"}`（空串=免密）或缺省=随机生成仅返回一次；未知 404 |
@@ -297,6 +299,8 @@ blobs/<sha256>   # 仅 scope=full：去重后的书文件内容（一 hash 一�
 
 客户端入口：设置菜单「推送书籍」（fork 自有组件，`services/selfhostPush.ts`；书列表只列 `uploadedAt` 的书）与「推荐收件箱」（挂载/开框/决策后各拉一次，无轮询循环，徽标显示未领数）。
 
+**设备号排除（⑪-P1）**：推送双向只面向真人账号（`kind='person'`）——发起方是设备号 400 `{"error":"device accounts cannot push books",...}`，收件方是设备号 400 `{"error":"cannot push to a device account",...}`；「好友推荐」语义与匿名设备档案隔离。
+
 ## 7. 服务端配置（本项目 env 集）
 
 | env | 缺省 | 说明 |
@@ -308,11 +312,12 @@ blobs/<sha256>   # 仅 scope=full：去重后的书文件内容（一 hash 一�
 | `MAX_BODY_BYTES` | 512 MiB | 单请求体上限（axum 默认仅 2 MiB，会拒掉整本书的 blob PUT；注意 blob 体整体进内存， audiobook 等超大文件按需调低/调高） |
 | `LIBRARY_SHARED` | `1` | `0` = OPDS 目录只显示调用者自己的上传 |
 | `ADMIN_TOKEN` | 空 | 运维兜底轨：设了才能用静态页 + Bearer token 直调 /api/admin；**不设也不影响** admin 用户 JWT 走客户端管理页；设了同时启用 supervisor→管理页的指标推送（§6.6） |
+| `ALLOW_AUTO_PROVISION` | 关（仅 `1`/`true` 开） | 设备身份自动建号（§1）：UUID 形状 email + ≥16 字符密码的首次登录自动建 `kind='device'` 账号；缺省关=未知凭据一律 401 零建号 |
 | `READEST_NODE` | 空 | readest-supervisor 专用：node 可执行文件路径（缺省依次找 exe 旁 `node`/`node.exe` → PATH；web 服务需要 Node ≥ 20） |
 | `DEEPL_API_KEY` / `DEEPL_ENDPOINT` | 空 | 空 = mock 回显 |
 | `RUST_LOG` | `info` | tracing |
 
-ywz 的 `AUTH_CODE`/`METADATA_BACKEND`/`METADATA_DSN`/`STORAGE_KIND`/`LOCAL_ROOT`/`S3_*` 不保留；用户与密码管理走 CLI 或 admin API（§6.4）：`sync-server add-user <email> [--password <明文，缺省随机生成并打印；空串 = 免密账号>] [--admin]`、`set-role <email> <admin|user>`、`list-users`、`disable-user <email>`、`passwd <email> [--password <新密码>]`（`--code` 仍被接受为别名）。库表：`users(id TEXT PK, email TEXT UNIQUE, code_sha256 TEXT, code_argon2 TEXT, plan TEXT DEFAULT 'pro', disabled INTEGER DEFAULT 0, role TEXT DEFAULT 'user', created_at TEXT, last_seen_at INTEGER NULL)`（`code_sha256`/`code_argon2` 列名沿用登录码时代，现承载密码；`role`/`last_seen_at` 列对既有库由启动迁移自动补齐）。
+ywz 的 `AUTH_CODE`/`METADATA_BACKEND`/`METADATA_DSN`/`STORAGE_KIND`/`LOCAL_ROOT`/`S3_*` 不保留；用户与密码管理走 CLI 或 admin API（§6.4）：`sync-server add-user <email> [--password <明文，缺省随机生成并打印；空串 = 免密账号>] [--admin] [--kind person|device]`、`set-role <email> <admin|user>`、`list-users`、`disable-user <email>`、`passwd <email> [--password <新密码>]`（`--code` 仍被接受为别名）。库表：`users(id TEXT PK, email TEXT UNIQUE, code_sha256 TEXT, code_argon2 TEXT, plan TEXT DEFAULT 'pro', disabled INTEGER DEFAULT 0, role TEXT DEFAULT 'user', kind TEXT DEFAULT 'person', created_at TEXT, last_seen_at INTEGER NULL)`（`code_sha256`/`code_argon2` 列名沿用登录码时代，现承载密码；`role`/`last_seen_at`/`kind` 列对既有库由启动迁移自动补齐）。
 
 ## 8. 客户端依赖的隐含前提（回归清单）
 
