@@ -48,6 +48,11 @@ const BUDGETS = {
   'apps/readest-app/src/services/libraryService.ts': 18,
   'apps/readest-app/src/libs/storage.ts': 40,
   'apps/readest-app/src/helpers/auth.ts': 20,
+  // ⑪-P2 metadata-only connection gates (transferManager already carried
+  // ⑪-era hunks): gate condition + explicit-action hint branch each, both
+  // referencing the fork connections module; measured on committed HEAD.
+  'apps/readest-app/src/services/transferManager.ts': 22,
+  'apps/readest-app/src/app/library/hooks/useBookTransferActions.ts': 22,
   // build/CI/config — small, stable
   'apps/readest-app/package.json': 12,
   'package.json': 6,

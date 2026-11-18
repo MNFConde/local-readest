@@ -326,3 +326,4 @@ ywz 的 `AUTH_CODE`/`METADATA_BACKEND`/`METADATA_DSN`/`STORAGE_KIND`/`LOCAL_ROOT
 3. 书架进度依赖 config→book 的进度搭载；删除依赖 `deleted_at` 双通道传播（books 行级 + notes OR 条件）。
 4. books 拉取游标是 `synced_at`（服务器时钟）；客户端把响应行尾 `synced_at` 转回 ms 作下一轮 `since`。
 5. 副本 HLC 字符串比较即时间序，禁止解析成数值。
+6. ⑪-P2 多连接（纯客户端）：`selfhosted_connections` 记录每次成功登录、`selfhosted_active_connection` 指向当前连接；`selfhosted_server_url`/`selfhosted_credentials` 恒等于激活连接（静默重登语义不变）。切换连接由客户端清零 settings.json 的 books/configs/notes 游标与 `lastSyncedAtReplicas` 并删 `readest_transfer_queue` 后硬刷新——服务端无感知；仅元数据模式只挡客户端文件传输（上传/下载），不涉新端点。
