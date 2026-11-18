@@ -44,6 +44,8 @@ import SelfhostArchiveMenuItem from './SelfhostArchiveMenuItem';
 // SELFHOSTED (fork): user-to-user book push + recommended inbox (⑬).
 import SelfhostPushMenuItem from './SelfhostPushMenuItem';
 import SelfhostInboxMenuItem from './SelfhostInboxMenuItem';
+// SELFHOSTED (fork): device identity backup entry (⑪-P1).
+import SelfhostDeviceMenuItem from './SelfhostDeviceMenuItem';
 import Quota from '@/components/Quota';
 import Menu from '@/components/Menu';
 import { type AppLockDialogMode, useAppLockStore } from '@/store/appLockStore';
@@ -427,6 +429,7 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({ onPullLibrary, setIsDropdow
       <SelfhostArchiveMenuItem onNavigated={() => setIsDropdownOpen?.(false)} />
       <SelfhostPushMenuItem onNavigated={() => setIsDropdownOpen?.(false)} />
       <SelfhostInboxMenuItem onNavigated={() => setIsDropdownOpen?.(false)} />
+      <SelfhostDeviceMenuItem onNavigated={() => setIsDropdownOpen?.(false)} />
       <hr aria-hidden='true' className='border-base-200 my-1' />
       <MenuItem label={_('Advanced Settings')}>
         <ul className='ms-0 flex flex-col ps-0 before:hidden'>
