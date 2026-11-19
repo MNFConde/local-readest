@@ -14,9 +14,14 @@ cargo run --release
 # 裸端口解析成单个本机地址，导致 127.0.0.1/局域网连不上）
 # QUOTA_BYTES 默认 2 GiB/人；MAX_BODY_BYTES 默认 512 MiB（单请求体上限，
 # axum 隐含默认仅 2 MiB 会拒掉整本书的上传——调大请自担内存占用，blob 体整体进内存）
+# SNAPSHOT_INTERVAL_HOURS=24 开自动快照链（默认关，SNAPSHOT_KEEP 控制保留份数，默认 3）
 ```
 
 单文件部署：`cargo build --release` 产物为独立 `sync-server.exe`（CGO 无关，SQLite 已 bundled）；更新=替换 exe、保留 `data/`。删掉 `data/` 会轮换 JWT 密钥（全员重新登录）。
+
+## 自动快照链（⑫-b，默认关）
+
+设 `SNAPSHOT_INTERVAL_HOURS=24`（间隔小时数，0/未设=关）后，服务器按间隔把「db 快照 + blobs/ + jwt_secret.key」三件套 tar（与 `GET /api/admin/backup` 完全一致）写到 `<DATA_DIR>/snapshots/readest-snapshot-<UTC时间戳>.tar`，保留最近 `SNAPSHOT_KEEP` 份（默认 3，超额删最旧；手动/端点生成的快照同样受截断）。**每份体积≈整个书库**，默认关即防止存量部署磁盘意外膨胀。管理页「维护」标签页有「自动快照」卡片（状态/立即生成/逐份下载删除）；与手动备份共用 `backup_busy` 守卫（忙=本拍跳过不排队）。恢复：停服 → 清 data 目录 → 解 tar → 重启（密钥在档，已发 token 不失效）。契约 `docs/selfhosted/sync-protocol.md` §6.4。
 
 ## 书库（OPDS + 管理页）
 

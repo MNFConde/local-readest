@@ -175,6 +175,12 @@ Edge TTS 依赖微软免费接口（websocket 协议）；Rust 实现可用等�
 | `POST /api/admin/users/<email>/role` | 改角色 `{"role":"admin"|"user"}`；改自己 400 |
 | `POST /api/admin/users/<email>/state` | 停用·启用 `{"disabled":bool}` |
 | `GET /api/admin/backup` | 完整重建备份：流式 tar（`readest.db` VACUUM INTO 快照 + `blobs/` 整目录 + `jwt_secret.key`；env 注入的 secret 无文件时以内存值入档），`Content-Disposition` 文件名 `readest-backup-<UTC时间戳>.tar`；`files/` 不打包（硬链接副本由 blobs 重物化），解包到全新 data_dir 即起、已发客户端 token 不失效；同一时刻仅允许一个备份，进行中再请求 409 |
+| `GET /api/admin/snapshots` | 快照链元数据（⑫-b）：`{"enabled", "intervalHours", "keep", "snapshots":[{"name","bytes"}]}`——列表为 `<DATA_DIR>/snapshots/readest-snapshot-*.tar` 按名字（即 UTC 时间戳）降序；名字白名单（`^[A-Za-z0-9._-]+\.tar$`）由下载/删除两端点共用 |
+| `POST /api/admin/snapshots` | 立即生成一份快照（成员与 backup 一致：db 快照 + blobs/ + jwt_secret.key，文件名 `readest-snapshot-<UTC时间戳>.tar`）；与手动备份共用 `backup_busy` 守卫，忙时 409；成功后按 keep 截断最旧 |
+| `GET /api/admin/snapshots/<name>` | 下载指定快照（流式 tar 原样）；名字不在白名单 400，不存在 404 |
+| `DELETE /api/admin/snapshots/<name>` | 删除指定快照；名字不在白名单 400，不存在 404 |
+
+**自动快照链（⑫-b）**：`SNAPSHOT_INTERVAL_HOURS` 设了才启用——服务端启动 spawn 后台循环（首拍跳过），每拍生成一份全服务器三件套快照到 `<DATA_DIR>/snapshots/`（与手动下载备份互斥：`backup_busy` 忙=本拍静默跳过，不排队）；`SNAPSHOT_KEEP` 控制保留份数（默认 3），每次生成后删除超额最旧。每份体积≈整个书库（db+blobs），默认关就是为了存量部署不意外膨胀。恢复口径与 backup 相同：停服→清 data_dir→解 tar→重启。管理页「维护」标签页新增「自动快照」卡片（状态行+立即快照+逐份下载/删除）。
 
 ### 6.5 元数据代理补强
 
@@ -313,6 +319,8 @@ blobs/<sha256>   # 仅 scope=full：去重后的书文件内容（一 hash 一�
 | `LIBRARY_SHARED` | `1` | `0` = OPDS 目录只显示调用者自己的上传 |
 | `ADMIN_TOKEN` | 空 | 运维兜底轨：设了才能用静态页 + Bearer token 直调 /api/admin；**不设也不影响** admin 用户 JWT 走客户端管理页；设了同时启用 supervisor→管理页的指标推送（§6.6） |
 | `ALLOW_AUTO_PROVISION` | 关（仅 `1`/`true` 开） | 设备身份自动建号（§1）：UUID 形状 email + ≥16 字符密码的首次登录自动建 `kind='device'` 账号；缺省关=未知凭据一律 401 零建号 |
+| `SNAPSHOT_INTERVAL_HOURS` | 关（未设/0 = 不启用） | 自动快照链间隔小时数（⑫-b，§6.4）：设了才在启动时 spawn 后台快照循环，快照落 `<DATA_DIR>/snapshots/` |
+| `SNAPSHOT_KEEP` | 3 | 快照链保留份数（⑫-b）：每次生成后删除超额最旧；与 `SNAPSHOT_INTERVAL_HOURS` 无关，手动/端点生成的快照同样受其截断 |
 | `READEST_NODE` | 空 | readest-supervisor 专用：node 可执行文件路径（缺省依次找 exe 旁 `node`/`node.exe` → PATH；web 服务需要 Node ≥ 20） |
 | `DEEPL_API_KEY` / `DEEPL_ENDPOINT` | 空 | 空 = mock 回显 |
 | `RUST_LOG` | `info` | tracing |
