@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod events;
 pub mod identity;
+pub mod manual;
 pub mod service;
 
 use std::sync::Arc;

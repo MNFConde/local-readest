@@ -729,6 +729,7 @@ pub fn run() {
             localsend::commands::localsend_cancel_receive,
             localsend::commands::localsend_send_files,
             localsend::commands::localsend_cancel_send,
+            localsend::manual::localsend_connect_manual,
             #[cfg(desktop)]
             spawn_fresh_browser::spawn_fresh_browser,
             nightly_update::verify_update_signature,

@@ -172,5 +172,11 @@
   "Login removed from this device; the account stays on the server.": "Login removed from this device; the account stays on the server.",
   "Metadata-only connections skip book file transfers (covers excepted).": "Metadata-only connections skip book file transfers (covers excepted).",
   "Metadata-only connection skips book file uploads ({{title}})": "Metadata-only connection skips book file uploads ({{title}})",
-  "Metadata-only connection skips book file downloads ({{title}})": "Metadata-only connection skips book file downloads ({{title}})"
+  "Metadata-only connection skips book file downloads ({{title}})": "Metadata-only connection skips book file downloads ({{title}})",
+  "Add device manually": "Add device manually",
+  "Host or IP, e.g. 192.168.1.7:53317": "Host or IP, e.g. 192.168.1.7:53317",
+  "Connect": "Connect",
+  "Collapse manual connect": "Collapse manual connect",
+  "Enter a valid address like 192.168.1.7:53317": "Enter a valid address like 192.168.1.7:53317",
+  "Connected to {{alias}} — pick it from the list above": "Connected to {{alias}} — pick it from the list above"
 }

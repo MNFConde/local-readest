@@ -24,6 +24,8 @@ import { ipTag } from '@/services/localsend/deviceModel';
 import { isPairedDevice } from '@/services/localsend/pairedDevices';
 import { previewDataUrl } from '@/services/localsend/preview';
 import type { LocalSendDevice, SendFileInput } from '@/services/localsend/types';
+// SELFHOSTED (fork): manual host:port fallback for multicast-blocked networks.
+import ManualConnectRow from '@/libs/selfhost/ManualConnectRow';
 
 interface DevicePickerDialogProps {
   files: SendFileInput[];
@@ -384,6 +386,8 @@ const DevicePickerDialog: React.FC<DevicePickerDialogProps> = ({ files, onClose 
               })}
             </div>
           )}
+
+          {status?.running && !sendState && <ManualConnectRow />}
 
           {status?.running && sendState && (
             <div className='flex items-center justify-between gap-2 text-sm'>

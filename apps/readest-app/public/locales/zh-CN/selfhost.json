@@ -172,5 +172,11 @@
   "Login removed from this device; the account stays on the server.": "已从此设备移除登录记录；账号仍保留在服务器上。",
   "Metadata-only connections skip book file transfers (covers excepted).": "仅元数据连接不传输书籍文件（封面除外）。",
   "Metadata-only connection skips book file uploads ({{title}})": "仅元数据连接不上传书籍文件（{{title}}）",
-  "Metadata-only connection skips book file downloads ({{title}})": "仅元数据连接不下载书籍文件（{{title}}）"
+  "Metadata-only connection skips book file downloads ({{title}})": "仅元数据连接不下载书籍文件（{{title}}）",
+  "Add device manually": "手动添加设备",
+  "Host or IP, e.g. 192.168.1.7:53317": "主机地址，如 192.168.1.7:53317",
+  "Connect": "连接",
+  "Collapse manual connect": "收起手动连接",
+  "Enter a valid address like 192.168.1.7:53317": "请输入形如 192.168.1.7:53317 的地址",
+  "Connected to {{alias}} — pick it from the list above": "已连接 {{alias}}——请在上方列表中选择"
 }
