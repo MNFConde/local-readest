@@ -1354,7 +1354,7 @@ dependencies = [
 
 [[package]]
 name = "sync-server"
-version = "0.12.20"
+version = "0.12.21"
 dependencies = [
  "anyhow",
  "argon2",
