@@ -33,13 +33,8 @@ pub async fn connect_manual(
     host: String,
     port: u16,
 ) -> Result<ManualPeerInfo, String> {
-    let client = LsHttpClientV2::try_new(
-        key_pem,
-        cert_pem,
-        None,
-        Some(Duration::from_secs(5)),
-    )
-    .map_err(|e| format!("client setup failed: {e}"))?;
+    let client = LsHttpClientV2::try_new(key_pem, cert_pem, None, Some(Duration::from_secs(5)))
+        .map_err(|e| format!("client setup failed: {e}"))?;
     let info = client
         .info(ProtocolType::Https, &host, port)
         .await
