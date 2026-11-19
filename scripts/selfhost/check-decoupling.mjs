@@ -53,6 +53,15 @@ const BUDGETS = {
   // referencing the fork connections module; measured on committed HEAD.
   'apps/readest-app/src/services/transferManager.ts': 22,
   'apps/readest-app/src/app/library/hooks/useBookTransferActions.ts': 22,
+  // ⑪-P3 manual connect seam (measured on committed HEAD): module registration
+  // lines in the Tauri shell + the picker row import/JSX; manual.rs itself is
+  // fork-owned (new file, no budget). build.rs carries its pre-existing fork
+  // lines (CEF/dev-mode block) plus the one command-list line.
+  'apps/readest-app/src-tauri/src/lib.rs': 1,
+  'apps/readest-app/src-tauri/src/localsend/mod.rs': 1,
+  'apps/readest-app/src-tauri/build.rs': 12,
+  'apps/readest-app/src-tauri/capabilities/default.json': 3,
+  'apps/readest-app/src/components/localsend/DevicePickerDialog.tsx': 4,
   // build/CI/config — small, stable
   'apps/readest-app/package.json': 12,
   'package.json': 6,
