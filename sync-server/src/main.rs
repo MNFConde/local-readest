@@ -188,6 +188,19 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
     });
 
     let addr = state.cfg.listen_addr.clone();
+    // ⑫-b snapshot chain: spawned only when SNAPSHOT_INTERVAL_HOURS enables it
+    // (the loop itself returns immediately when the chain is off).
+    #[cfg(feature = "library")]
+    if state
+        .cfg
+        .snapshot_interval_hours
+        .filter(|h| *h > 0)
+        .is_some()
+    {
+        tokio::spawn(sync_server::library::admin::run_snapshot_loop(
+            state.clone(),
+        ));
+    }
     let app = routes::router(state);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("sync-server listening on {addr}");

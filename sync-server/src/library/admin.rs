@@ -51,6 +51,13 @@ pub fn router(state: SharedState) -> Router<SharedState> {
         .route("/stats", get(get_stats))
         // Full-server rebuild archive for the Maintenance tab.
         .route("/backup", get(backup))
+        // Snapshot chain (⑫-b): metadata + on-demand snapshot + per-file
+        // download/delete for the Maintenance tab's snapshot card.
+        .route("/snapshots", get(list_snapshots).post(create_snapshot))
+        .route(
+            "/snapshots/{name}",
+            get(download_snapshot).delete(delete_snapshot),
+        )
         .with_state(state)
 }
 
@@ -972,6 +979,10 @@ async fn get_stats(
         .map(|m| m.len())
         .sum();
 
+    // ⑫-b snapshot chain (≤ SNAPSHOT_KEEP archives, cheap to walk).
+    let snapshots = list_snapshot_files(&state);
+    let snapshots_bytes: u64 = snapshots.iter().map(|(_, b)| b).sum();
+
     Ok(Json(json!({
         "users": {
             "total": users_total,
@@ -990,6 +1001,8 @@ async fn get_stats(
             "blobs_count": blobs_count,
             "db_bytes": db_bytes,
             "dedup_saved_bytes": files_bytes.saturating_sub(blobs_bytes),
+            "snapshots_bytes": snapshots_bytes,
+            "snapshots_count": snapshots.len(),
         },
         "server": {
             "version": env!("CARGO_PKG_VERSION"),
@@ -1029,23 +1042,35 @@ fn write_backup_tar(
     // Inner scope: tar::Builder holds `writer` until its Drop runs.
     {
         let mut builder = tar::Builder::new(&mut writer);
-        builder.append_path_with_name(snapshot, "readest.db")?;
-        // Blobs are the authoritative bytes; per-uid files/ copies are rebuilt
-        // from them on restore (the blob file name is the content hash).
-        let mut blobs = Vec::new();
-        collect_files(blobs_root, &mut String::new(), &mut blobs);
-        blobs.sort();
-        for (key, path) in &blobs {
-            builder.append_path_with_name(path, format!("blobs/{key}"))?;
-        }
-        let mut header = tar::Header::new_gnu();
-        header.set_size(jwt_secret.len() as u64);
-        header.set_mode(0o600);
-        header.set_cksum();
-        builder.append_data(&mut header, "jwt_secret.key", jwt_secret.as_bytes())?;
-        builder.finish()?;
+        append_rebuild_triple(&mut builder, snapshot, blobs_root, jwt_secret)?;
     }
     writer.flush()
+}
+
+/// The rebuild triple every full-server archive carries — `readest.db`
+/// snapshot, the whole blob store, and the JWT secret. Shared by the
+/// streaming backup (⑩-era) and the snapshot chain (⑫-b).
+fn append_rebuild_triple<W: std::io::Write>(
+    builder: &mut tar::Builder<W>,
+    snapshot: &FsPath,
+    blobs_root: &FsPath,
+    jwt_secret: &str,
+) -> std::io::Result<()> {
+    builder.append_path_with_name(snapshot, "readest.db")?;
+    // Blobs are the authoritative bytes; per-uid files/ copies are rebuilt
+    // from them on restore (the blob file name is the content hash).
+    let mut blobs = Vec::new();
+    collect_files(blobs_root, &mut String::new(), &mut blobs);
+    blobs.sort();
+    for (key, path) in &blobs {
+        builder.append_path_with_name(path, format!("blobs/{key}"))?;
+    }
+    let mut header = tar::Header::new_gnu();
+    header.set_size(jwt_secret.len() as u64);
+    header.set_mode(0o600);
+    header.set_cksum();
+    builder.append_data(&mut header, "jwt_secret.key", jwt_secret.as_bytes())?;
+    builder.finish()
 }
 
 /// GET /api/admin/backup — one tar, streamed. Two concurrent backups are
@@ -1107,15 +1132,7 @@ async fn backup(
     });
 
     let now = time::OffsetDateTime::now_utc();
-    let stamp = format!(
-        "{:04}{:02}{:02}-{:02}{:02}{:02}",
-        now.year(),
-        u8::from(now.month()),
-        now.day(),
-        now.hour(),
-        now.minute(),
-        now.second()
-    );
+    let stamp = utc_stamp(&now);
     Response::builder()
         .header(header::CONTENT_TYPE, "application/x-tar")
         .header(
@@ -1126,4 +1143,284 @@ async fn backup(
             tokio_stream::wrappers::ReceiverStream::new(rx),
         ))
         .map_err(super::admin_error)
+}
+
+// ── snapshot chain (⑫-b, admin console Maintenance tab) ────────────────────
+// Periodic full-server snapshots — the same rebuild triple as `backup` —
+// written to `<DATA_DIR>/snapshots/readest-snapshot-<UTC stamp>.tar` and
+// pruned to SNAPSHOT_KEEP. Off by default (SNAPSHOT_INTERVAL_HOURS unset/0):
+// each snapshot is roughly the size of the whole store, so the chain only
+// runs when the operator asks for it. The on-demand POST and the loop share
+// `try_take_snapshot`, which contends on `backup_busy` (busy → skip/409).
+// Contract: sync-protocol.md §6.4.
+
+/// `YYYYMMDD-HHMMSS` in UTC — the sort key of the chain is also its timestamp.
+fn utc_stamp(now: &time::OffsetDateTime) -> String {
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}",
+        now.year(),
+        u8::from(now.month()),
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second()
+    )
+}
+
+/// Only names produced by this module (or matching the same shape) may be
+/// downloaded or deleted: a strict whitelist keeps traversal out of the path.
+fn valid_snapshot_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.ends_with(".tar")
+        && name[..name.len() - 4]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+        && !name.starts_with('.')
+}
+
+fn snapshots_dir(state: &SharedState) -> PathBuf {
+    state.cfg.snapshots_root()
+}
+
+/// The chain, newest first: name sort = timestamp sort.
+fn list_snapshot_files(state: &SharedState) -> Vec<(String, u64)> {
+    let dir = snapshots_dir(state);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<(String, u64)> = entries
+        .flatten()
+        .filter(|e| e.file_type().map(|t| !t.is_dir()).unwrap_or(false))
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_string();
+            if !valid_snapshot_name(&name) {
+                return None;
+            }
+            let bytes = e.metadata().ok()?.len();
+            Some((name, bytes))
+        })
+        .collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files
+}
+
+/// Deletes the oldest snapshots past the configured keep count. Runs after
+/// every snapshot (manual or automatic) so the bound holds everywhere.
+fn prune_snapshots(state: &SharedState) {
+    let keep = state.cfg.snapshot_keep.max(1) as usize;
+    let stale = list_snapshot_files(state)
+        .into_iter()
+        .skip(keep)
+        .map(|(name, _)| snapshots_dir(state).join(&name));
+    for path in stale {
+        if let Err(err) = std::fs::remove_file(&path) {
+            tracing::warn!(%err, path = %path.display(), "snapshot prune failed");
+        }
+    }
+}
+
+/// Builds one snapshot tar. `Ok(Some(path))` = written, `Ok(None)` = skipped
+/// because another backup/snapshot holds the busy guard, `Err` = failure
+/// (the partial file is removed; the guard is always reset here).
+fn try_take_snapshot(state: &SharedState) -> Result<Option<PathBuf>, anyhow::Error> {
+    use std::sync::atomic::Ordering;
+    if state
+        .backup_busy
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return Ok(None);
+    }
+    let outcome = (|| -> anyhow::Result<PathBuf> {
+        let dir = snapshots_dir(state);
+        std::fs::create_dir_all(&dir)?;
+
+        // Same db snapshot discipline as `backup`: clear a crashed run's tmp,
+        // then VACUUM INTO under the lock (transactional, brief write stall).
+        let tmp = state.cfg.data_dir.join("readest.db.backup-tmp");
+        let _ = std::fs::remove_file(&tmp);
+        {
+            let conn = state
+                .db
+                .lock()
+                .map_err(|_| anyhow::anyhow!("db lock poisoned"))?;
+            let tmp_sql = tmp.to_string_lossy().into_owned();
+            conn.execute("VACUUM INTO ?1", params![tmp_sql])
+                .map_err(|e| anyhow::anyhow!("VACUUM INTO failed: {e}"))?;
+        }
+
+        // An env-provided secret has no file on disk — same fallback as
+        // `backup`, so restored snapshots keep every issued token valid.
+        let jwt_secret = std::fs::read_to_string(state.cfg.data_dir.join("jwt_secret.key"))
+            .unwrap_or_else(|_| state.cfg.jwt_secret.clone());
+        let jwt_secret = jwt_secret.trim().to_string();
+
+        let now = time::OffsetDateTime::now_utc();
+        let out = dir.join(format!("readest-snapshot-{}.tar", utc_stamp(&now)));
+        let write = || -> std::io::Result<()> {
+            let file = std::fs::File::create(&out)?;
+            let mut builder = tar::Builder::new(file);
+            append_rebuild_triple(&mut builder, &tmp, &state.cfg.blobs_root(), &jwt_secret)?;
+            builder.into_inner()?.sync_all()
+        };
+        if let Err(err) = write() {
+            let _ = std::fs::remove_file(&out);
+            return Err(anyhow::Error::new(err).context("snapshot tar write failed"));
+        }
+        Ok(out)
+    })();
+    state.backup_busy.store(false, Ordering::Release);
+    outcome.map(Some)
+}
+
+/// GET /api/admin/snapshots — chain metadata for the Maintenance tab.
+async fn list_snapshots(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    require_admin(&state, &headers).await?;
+    let interval = state.cfg.snapshot_interval_hours.filter(|h| *h > 0);
+    let snapshots = list_snapshot_files(&state)
+        .into_iter()
+        .map(|(name, bytes)| json!({ "name": name, "bytes": bytes }))
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "enabled": interval.is_some(),
+        "intervalHours": interval,
+        "keep": state.cfg.snapshot_keep,
+        "snapshots": snapshots,
+    }))
+    .into_response())
+}
+
+/// POST /api/admin/snapshots — one snapshot now. 409 while a backup or
+/// another snapshot holds the busy guard (never queued: snapshots are
+/// operator intent, not a backlog).
+async fn create_snapshot(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    use std::sync::atomic::Ordering;
+    require_admin(&state, &headers).await?;
+    let busy = state
+        .backup_busy
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err();
+    if busy {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "backup already in progress" })),
+        )
+            .into_response());
+    }
+    state.backup_busy.store(false, Ordering::Release);
+    let task_state = state.clone();
+    let taken = tokio::task::spawn_blocking(move || try_take_snapshot(&task_state))
+        .await
+        .map_err(|e| super::admin_error(anyhow::anyhow!("snapshot task join failed: {e}")))?;
+    match taken {
+        Ok(Some(path)) => {
+            prune_snapshots(&state);
+            let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            Ok(Json(json!({
+                "name": path.file_name().and_then(|n| n.to_str()).unwrap_or_default(),
+                "bytes": bytes,
+            }))
+            .into_response())
+        }
+        Ok(None) => Err((
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "backup already in progress" })),
+        )
+            .into_response()),
+        Err(err) => Err(super::admin_error(err)),
+    }
+}
+
+/// GET /api/admin/snapshots/<name> — the archive bytes, verbatim.
+async fn download_snapshot(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Response, Response> {
+    require_admin(&state, &headers).await?;
+    if !valid_snapshot_name(&name) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid snapshot name" })),
+        )
+            .into_response());
+    }
+    let path = snapshots_dir(&state).join(&name);
+    match tokio::fs::File::open(&path).await {
+        Ok(file) => Response::builder()
+            .header(header::CONTENT_TYPE, "application/x-tar")
+            .header(
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{name}\""),
+            )
+            .body(Body::from_stream(tokio_util::io::ReaderStream::new(file)))
+            .map_err(super::admin_error),
+        Err(_) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "snapshot not found" })),
+        )
+            .into_response()),
+    }
+}
+
+/// DELETE /api/admin/snapshots/<name>.
+async fn delete_snapshot(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Response, Response> {
+    require_admin(&state, &headers).await?;
+    if !valid_snapshot_name(&name) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid snapshot name" })),
+        )
+            .into_response());
+    }
+    let path = snapshots_dir(&state).join(&name);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(Json(json!({ "deleted": name })).into_response()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "snapshot not found" })),
+        )
+            .into_response()),
+        Err(err) => Err(super::admin_error(anyhow::Error::new(err))),
+    }
+}
+
+/// The background chain (⑫-b): one snapshot per interval, first beat skipped.
+/// A busy guard (manual backup in flight) skips the beat — snapshots are
+/// opportunistic, never a queue. Errors log and the loop continues.
+pub async fn run_snapshot_loop(state: SharedState) {
+    let Some(hours) = state.cfg.snapshot_interval_hours.filter(|h| *h > 0) else {
+        return;
+    };
+    tracing::info!(
+        hours,
+        keep = state.cfg.snapshot_keep,
+        "snapshot chain started"
+    );
+    let mut interval =
+        tokio::time::interval(std::time::Duration::from_secs(hours.saturating_mul(3600)));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval.tick().await; // the immediate first tick: skip, the boot state was just persisted
+    loop {
+        interval.tick().await;
+        match try_take_snapshot(&state) {
+            Ok(Some(path)) => {
+                prune_snapshots(&state);
+                tracing::info!(path = %path.display(), "snapshot taken");
+            }
+            Ok(None) => tracing::debug!("snapshot skipped: a backup or snapshot is running"),
+            Err(err) => tracing::warn!(%err, "snapshot failed"),
+        }
+    }
 }

@@ -18,6 +18,12 @@ pub struct Config {
     /// account on first use. Default off — with the flag off, unknown
     /// credentials keep failing with the plain 401 and nothing is created.
     pub allow_auto_provision: bool,
+    /// ROADMAP ⑫-b: automatic snapshot chain interval in hours. None/0 = the
+    /// chain is off (the default): no background loop, no snapshots written.
+    pub snapshot_interval_hours: Option<u64>,
+    /// ROADMAP ⑫-b: how many snapshots to keep; the oldest beyond this are
+    /// pruned after every snapshot (manual or automatic).
+    pub snapshot_keep: u32,
     pub deepl_api_key: Option<String>,
     pub deepl_endpoint: Option<String>,
 }
@@ -36,6 +42,9 @@ const DEFAULT_MAX_BODY_BYTES: usize = 512 * 1024 * 1024;
 /// Auto-provisioned secret lives inside the data dir, so it travels with the
 /// data on backup/migration and rotates only when the data is removed.
 const JWT_SECRET_FILE: &str = "jwt_secret.key";
+
+/// ROADMAP ⑫-b: snapshots kept when SNAPSHOT_KEEP is unset or malformed.
+const DEFAULT_SNAPSHOT_KEEP: u32 = 3;
 
 /// Portable default: keep everything next to the executable so a
 /// double-clicked sync-server.exe stores its data where it lives, independent
@@ -81,6 +90,15 @@ impl Config {
         let library_shared = !matches!(get("LIBRARY_SHARED").as_deref(), Some("0" | "false"));
         let allow_auto_provision =
             matches!(get("ALLOW_AUTO_PROVISION").as_deref(), Some("1" | "true"));
+        // ⑫-b: unset/0 disables the chain; a malformed value is treated like
+        // unset (a typo must not silently multiply disk usage) and logged.
+        let snapshot_interval_hours = get("SNAPSHOT_INTERVAL_HOURS")
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|h| *h > 0);
+        let snapshot_keep = get("SNAPSHOT_KEEP")
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|k| *k > 0)
+            .unwrap_or(DEFAULT_SNAPSHOT_KEEP);
 
         Self {
             listen_addr: normalize_listen_addr(
@@ -93,6 +111,8 @@ impl Config {
             library_shared,
             admin_token: get("ADMIN_TOKEN").filter(|t| t.len() >= 8),
             allow_auto_provision,
+            snapshot_interval_hours,
+            snapshot_keep,
             deepl_api_key: get("DEEPL_API_KEY"),
             deepl_endpoint: get("DEEPL_ENDPOINT"),
         }
@@ -119,6 +139,12 @@ impl Config {
     /// hard links (library feature): identical bytes are stored once.
     pub fn blobs_root(&self) -> PathBuf {
         self.data_dir.join("blobs")
+    }
+
+    /// ROADMAP ⑫-b: the automatic snapshot chain writes here (one
+    /// `readest-snapshot-<stamp>.tar` per run, pruned to `snapshot_keep`).
+    pub fn snapshots_root(&self) -> PathBuf {
+        self.data_dir.join("snapshots")
     }
 }
 

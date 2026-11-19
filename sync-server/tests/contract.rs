@@ -26,6 +26,8 @@ pub fn test_config(tag: &str) -> Config {
         library_shared: true,
         admin_token: None,
         allow_auto_provision: false,
+        snapshot_interval_hours: None,
+        snapshot_keep: 3,
         deepl_api_key: None,
         deepl_endpoint: None,
     }
@@ -915,6 +917,8 @@ async fn storage_quota_enforced_on_blob_put() {
         library_shared: true,
         admin_token: None,
         allow_auto_provision: false,
+        snapshot_interval_hours: None,
+        snapshot_keep: 3,
         deepl_api_key: None,
         deepl_endpoint: None,
     };
@@ -948,6 +952,8 @@ async fn storage_blob_accepts_bodies_over_axum_default_limit() {
         library_shared: true,
         admin_token: None,
         allow_auto_provision: false,
+        snapshot_interval_hours: None,
+        snapshot_keep: 3,
         deepl_api_key: None,
         deepl_endpoint: None,
     };
@@ -2327,6 +2333,9 @@ async fn admin_stats_counts_sizes_and_auth() {
             // in-memory test DB: no file on disk
             "db_bytes": 0,
             "dedup_saved_bytes": 40,
+            // snapshot chain (⑫-b): empty by default
+            "snapshots_bytes": 0,
+            "snapshots_count": 0,
         })
     );
     assert_eq!(body["server"]["version"], env!("CARGO_PKG_VERSION"));
@@ -2441,8 +2450,277 @@ async fn admin_backup_tar_carries_rebuild_triple_and_auth() {
     let _ = std::fs::remove_file(&restored);
 }
 
-// ── user archive (⑫) ──────────────────────────────────────────────────────
+// ── snapshot chain (⑫-b) ─────────────────────────────────────────────────
 
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn admin_snapshots_lifecycle_auth_whitelist_and_triple() {
+    use std::io::{Cursor, Read};
+
+    let mut cfg = test_config("admin-snapshots");
+    cfg.admin_token = Some("op-token-snap".into());
+    let data_dir = cfg.data_dir.clone();
+    let state = test_state(cfg);
+    let uid_a = seed_user(&state, "snap-a@x.com", "code-snap-a1");
+    upload_catalog_book(&state, &uid_a, "hashSNAP", "Snapshotted").await;
+
+    let app = routes::router(state.clone());
+
+    // No credential → 401 on every endpoint.
+    let (status, _, _) =
+        admin_request(app.clone(), "GET", "/api/admin/snapshots", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) =
+        admin_request(app.clone(), "POST", "/api/admin/snapshots", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) =
+        admin_request(app.clone(), "GET", "/api/admin/snapshots/x.tar", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = admin_request(
+        app.clone(),
+        "DELETE",
+        "/api/admin/snapshots/x.tar",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Chain metadata: disabled by default, keep defaults to 3.
+    let (status, body, _) = admin_request(
+        app.clone(),
+        "GET",
+        "/api/admin/snapshots",
+        Some("op-token-snap"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["enabled"], false);
+    assert_eq!(body["keep"], 3);
+    assert_eq!(body["snapshots"], json!([]));
+
+    // One snapshot now.
+    let (status, body, _) = admin_request(
+        app.clone(),
+        "POST",
+        "/api/admin/snapshots",
+        Some("op-token-snap"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let name = body["name"].as_str().expect("name").to_string();
+    assert!(
+        name.starts_with("readest-snapshot-") && name.ends_with(".tar"),
+        "{name}"
+    );
+    let bytes_written = body["bytes"].as_u64().unwrap();
+    assert!(bytes_written > 0);
+    let snap_path = data_dir.join("snapshots").join(&name);
+    assert!(snap_path.is_file());
+    assert!(!state.backup_busy.load(std::sync::atomic::Ordering::Relaxed));
+
+    // The archive carries the same rebuild triple as backup — and no files/.
+    let file_bytes = std::fs::read(&snap_path).unwrap();
+    assert_eq!(file_bytes.len() as u64, bytes_written);
+    use sha2::{Digest, Sha256};
+    let blob_name = format!("blobs/{}", hex::encode(Sha256::digest(b"fake epub bytes")));
+    let (mut db_bytes, mut blob_bytes, mut secret_bytes, mut files_entries) =
+        (None, None, None, 0usize);
+    for entry in tar::Archive::new(Cursor::new(&file_bytes))
+        .entries()
+        .unwrap()
+    {
+        let mut entry = entry.unwrap();
+        let entry_name = entry.path().unwrap().to_string_lossy().into_owned();
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).unwrap();
+        if entry_name == "readest.db" {
+            db_bytes = Some(data);
+        } else if entry_name == blob_name {
+            blob_bytes = Some(data);
+        } else if entry_name == "jwt_secret.key" {
+            secret_bytes = Some(data);
+        }
+        if entry_name.starts_with("files/") {
+            files_entries += 1;
+        }
+    }
+    assert!(db_bytes.as_ref().is_some_and(|d| !d.is_empty()));
+    assert_eq!(blob_bytes.as_deref(), Some(b"fake epub bytes".as_slice()));
+    assert_eq!(
+        secret_bytes.as_deref(),
+        Some("test-secret-0123456789abcdef".as_bytes())
+    );
+    assert_eq!(files_entries, 0, "files/ hard-link copies stay out");
+
+    // List now shows exactly one entry; download returns the same bytes.
+    let (status, body, _) = admin_request(
+        app.clone(),
+        "GET",
+        "/api/admin/snapshots",
+        Some("op-token-snap"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["snapshots"].as_array().unwrap().len(), 1);
+    assert_eq!(body["snapshots"][0]["name"], name.as_str());
+
+    let (status, downloaded, _) = request_raw(
+        app.clone(),
+        "GET",
+        &format!("/api/admin/snapshots/{name}"),
+        None,
+        None,
+        &[("Authorization", "Bearer op-token-snap")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(downloaded, file_bytes, "download must be verbatim");
+
+    // The name whitelist: path-shaped or dot-prefixed names are 400, unknown
+    // whitelisted names are 404.
+    let (status, _, _) = request_raw(
+        app.clone(),
+        "GET",
+        "/api/admin/snapshots/..%2Freadest.db",
+        None,
+        None,
+        &[("Authorization", "Bearer op-token-snap")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = request_raw(
+        app.clone(),
+        "GET",
+        "/api/admin/snapshots/no-such-snapshot.tar",
+        None,
+        None,
+        &[("Authorization", "Bearer op-token-snap")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Delete: gone from disk, second delete 404s, list back to empty.
+    let (status, body, _) = admin_request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/admin/snapshots/{name}"),
+        Some("op-token-snap"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["deleted"], name.as_str());
+    assert!(!snap_path.exists());
+    let (status, _, _) = admin_request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/admin/snapshots/{name}"),
+        Some("op-token-snap"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, body, _) = admin_request(
+        app,
+        "GET",
+        "/api/admin/snapshots",
+        Some("op-token-snap"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["snapshots"], json!([]));
+    drop(db_bytes);
+    drop(blob_bytes);
+    drop(secret_bytes);
+}
+
+#[cfg(feature = "library")]
+#[tokio::test]
+async fn admin_snapshots_busy_guard_and_keep_pruning() {
+    let mut cfg = test_config("admin-snap-prune");
+    cfg.admin_token = Some("op-token-snap2".into());
+    cfg.snapshot_keep = 2;
+    let data_dir = cfg.data_dir.clone();
+    let state = test_state(cfg);
+    let app = routes::router(state.clone());
+
+    // A manual backup in flight blocks the snapshot: 409, and the guard is
+    // left exactly as it was for the backup to finish.
+    state
+        .backup_busy
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let (status, _, _) = admin_request(
+        app.clone(),
+        "POST",
+        "/api/admin/snapshots",
+        Some("op-token-snap2"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(state.backup_busy.load(std::sync::atomic::Ordering::Relaxed));
+    state
+        .backup_busy
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+
+    // Pre-seed an old chain (junk bytes; name sort = timestamp sort), then a
+    // real snapshot. keep=2 prunes the oldest seed and keeps newest seed + real.
+    let dir = data_dir.join("snapshots");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, size) in [
+        ("readest-snapshot-20260101-000001.tar", 11),
+        ("readest-snapshot-20260101-000002.tar", 22),
+    ] {
+        std::fs::write(dir.join(name), vec![0u8; size]).unwrap();
+    }
+    let (status, body, _) = admin_request(
+        app.clone(),
+        "POST",
+        "/api/admin/snapshots",
+        Some("op-token-snap2"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let real_name = body["name"].as_str().unwrap().to_string();
+
+    let (status, body, _) = admin_request(
+        app,
+        "GET",
+        "/api/admin/snapshots",
+        Some("op-token-snap2"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<&str> = body["snapshots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), 2, "keep=2 must prune the oldest: {names:?}");
+    assert!(
+        names.contains(&real_name.as_str()),
+        "the fresh snapshot survives"
+    );
+    assert!(
+        names.contains(&"readest-snapshot-20260101-000002.tar"),
+        "newer seed survives"
+    );
+    assert!(
+        !dir.join("readest-snapshot-20260101-000001.tar").exists(),
+        "oldest pruned"
+    );
+    assert!(!state.backup_busy.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+// ── user archive (⑫) ──────────────────────────────────────────────────────
 /// POST raw tar bytes (the archive import body) with the caller's Bearer.
 async fn post_archive_import(
     app: axum::Router,
