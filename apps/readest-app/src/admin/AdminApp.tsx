@@ -8,7 +8,14 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from '@/hooks/useTranslation';
 import { jwtRole, jwtToUser } from '@/services/selfhostedAuth';
-import { adminApi, AdminApiError, AdminUser, BookHolder, CatalogBook } from './adminApi';
+import {
+  adminApi,
+  AdminApiError,
+  AdminUser,
+  BookHolder,
+  CatalogBook,
+  SnapshotMeta,
+} from './adminApi';
 import { humanBytes } from './format';
 import HostMonitorSection from './HostMonitorSection';
 import StatsSection from './StatsSection';
@@ -55,6 +62,8 @@ export default function AdminApp() {
   const [gcResult, setGcResult] = useState<string>('');
   const [enrichResult, setEnrichResult] = useState<string>('');
   const [backingUp, setBackingUp] = useState(false);
+  const [snapshots, setSnapshots] = useState<SnapshotMeta | null>(null);
+  const [snapshotting, setSnapshotting] = useState(false);
 
   useEffect(() => {
     const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
@@ -94,12 +103,22 @@ export default function AdminApp() {
     () => run(async () => setBooks(await adminApi.listBooks())),
     [run],
   );
+  const refreshSnapshots = useCallback(
+    () => run(async () => setSnapshots(await adminApi.listSnapshots())),
+    [run],
+  );
 
   useEffect(() => {
     if (gate !== 'ok') return;
     refreshUsers();
     refreshBooks();
   }, [gate, refreshUsers, refreshBooks]);
+
+  // The snapshot chain card loads (and reloads) when the Maintenance tab is
+  // opened — list is ≤ keep entries, so polling is unnecessary.
+  useEffect(() => {
+    if (gate === 'ok' && tab === 'maintenance') refreshSnapshots();
+  }, [gate, tab, refreshSnapshots]);
 
   if (gate === 'checking') {
     return <Centered>{_('Loading…')}</Centered>;
@@ -445,6 +464,81 @@ export default function AdminApp() {
                 >
                   {backingUp ? _('Preparing backup…') : _('Download backup')}
                 </button>
+              </div>
+              <div>
+                <h2 className='mb-1 text-base font-semibold'>{_('Snapshots')}</h2>
+                <p className='mb-2 text-xs opacity-60'>
+                  {_(
+                    'Periodic full-server snapshots — the same archive as Download backup, kept on the server under snapshots/.',
+                  )}
+                </p>
+                <p className='mb-2 text-xs'>
+                  {snapshots?.enabled
+                    ? _('Enabled: every {{hours}}h, keeping {{keep}}', {
+                        hours: snapshots.intervalHours,
+                        keep: snapshots.keep,
+                      })
+                    : _('Disabled — set SNAPSHOT_INTERVAL_HOURS to enable')}
+                </p>
+                <button
+                  className='btn btn-sm'
+                  disabled={snapshotting}
+                  onClick={() =>
+                    run(async () => {
+                      setSnapshotting(true);
+                      try {
+                        const res = await adminApi.createSnapshot();
+                        setSnapshots(await adminApi.listSnapshots());
+                        return _('Snapshot {{name}} created', { name: res.name });
+                      } finally {
+                        setSnapshotting(false);
+                      }
+                    })
+                  }
+                >
+                  {snapshotting ? _('Preparing snapshot…') : _('Take snapshot now')}
+                </button>
+                {snapshots && snapshots.snapshots.length > 0 ? (
+                  <table className='mt-3 w-full text-sm'>
+                    <tbody>
+                      {snapshots.snapshots.map((s) => (
+                        <tr key={s.name}>
+                          <td className='max-w-[220px] truncate py-1 font-mono text-xs'>
+                            {s.name}
+                          </td>
+                          <td className='py-1 text-xs opacity-60'>{humanBytes(s.bytes)}</td>
+                          <td className='py-1 text-right'>
+                            <button
+                              className='btn btn-ghost btn-xs'
+                              onClick={() =>
+                                run(async () => {
+                                  await adminApi.downloadSnapshot(s.name);
+                                  return _('Backup downloaded: {{name}}', { name: s.name });
+                                })
+                              }
+                            >
+                              {_('Download')}
+                            </button>
+                            <button
+                              className='btn btn-ghost btn-xs text-error'
+                              onClick={() =>
+                                run(async () => {
+                                  await adminApi.deleteSnapshot(s.name);
+                                  setSnapshots(await adminApi.listSnapshots());
+                                  return undefined;
+                                })
+                              }
+                            >
+                              {_('Delete')}
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  snapshots && <p className='mt-2 text-xs opacity-60'>{_('No snapshots yet')}</p>
+                )}
               </div>
               <div>
                 <h2 className='mb-1 text-base font-semibold'>{_('Blob storage')}</h2>

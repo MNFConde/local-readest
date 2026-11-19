@@ -100,8 +100,19 @@ export interface ServerStats {
     blobs_count: number;
     db_bytes: number;
     dedup_saved_bytes: number;
+    snapshots_bytes?: number;
+    snapshots_count?: number;
   };
   server: { version: string; uptime_secs: number };
+}
+
+// ── snapshot chain (⑫-b, sync-protocol.md §6.4) ────────────────────────────
+
+export interface SnapshotMeta {
+  enabled: boolean;
+  intervalHours: number | null;
+  keep: number;
+  snapshots: { name: string; bytes: number }[];
 }
 
 function authHeader(): Record<string, string> {
@@ -233,6 +244,35 @@ export const adminApi = {
 
   /** Aggregated overview numbers (counts, disk sizes, version, uptime). */
   getStats: () => adminFetch<ServerStats>('/stats'),
+
+  /** Snapshot chain metadata for the Maintenance tab (⑫-b). */
+  listSnapshots: () => adminFetch<SnapshotMeta>('/snapshots'),
+
+  /** One snapshot now; 409 while a backup or another snapshot is running. */
+  createSnapshot: () =>
+    adminFetch<{ name: string; bytes: number }>('/snapshots', {
+      method: 'POST',
+    }),
+
+  /** Downloads one snapshot tar verbatim (same transport as downloadBackup). */
+  downloadSnapshot: async (name: string): Promise<void> => {
+    const res = await adminFetchRaw(`/snapshots/${encodeURIComponent(name)}`);
+    if (!res.ok) {
+      throw new AdminApiError(`Snapshot download failed (HTTP ${res.status})`, res.status);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = name;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  },
+
+  deleteSnapshot: (name: string) =>
+    adminFetch<{ deleted: string }>(`/snapshots/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    }),
 
   /**
    * Downloads the full-server backup tar (GET /backup) as a file. Binary, so

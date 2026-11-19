@@ -8,20 +8,36 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
 
-const { listUsers, listBooks, getBookHolders, deleteBook, getStats, downloadBackup } = vi.hoisted(
-  () => ({
-    listUsers: vi.fn(),
-    listBooks: vi.fn(),
-    getBookHolders: vi.fn(),
-    deleteBook: vi.fn(),
-    getStats: vi.fn(),
-    downloadBackup: vi.fn(),
-  }),
-);
-
-vi.mock('@/hooks/useTranslation', () => ({
-  useTranslation: () => (s: string) => s,
+const {
+  listUsers,
+  listBooks,
+  getBookHolders,
+  deleteBook,
+  getStats,
+  downloadBackup,
+  listSnapshots,
+  createSnapshot,
+  downloadSnapshot,
+  deleteSnapshot,
+} = vi.hoisted(() => ({
+  listUsers: vi.fn(),
+  listBooks: vi.fn(),
+  getBookHolders: vi.fn(),
+  deleteBook: vi.fn(),
+  getStats: vi.fn(),
+  downloadBackup: vi.fn(),
+  listSnapshots: vi.fn(),
+  createSnapshot: vi.fn(),
+  downloadSnapshot: vi.fn(),
+  deleteSnapshot: vi.fn(),
 }));
+
+vi.mock('@/hooks/useTranslation', () => {
+  // One stable translator instance: AdminApp's run/refresh callbacks key off
+  // it (useTranslation identity), so a per-call arrow would re-fire effects.
+  const t = (s: string) => s;
+  return { useTranslation: () => t };
+});
 
 vi.mock('@/services/selfhostedServerUrl', () => ({
   getSelfhostedServerUrl: () => 'http://127.0.0.1:8080',
@@ -34,7 +50,18 @@ vi.mock('@/services/selfhostedAuth', () => ({
 
 vi.mock('@/admin/adminApi', () => ({
   AdminApiError: class extends Error {},
-  adminApi: { listUsers, listBooks, getBookHolders, deleteBook, getStats, downloadBackup },
+  adminApi: {
+    listUsers,
+    listBooks,
+    getBookHolders,
+    deleteBook,
+    getStats,
+    downloadBackup,
+    listSnapshots,
+    createSnapshot,
+    downloadSnapshot,
+    deleteSnapshot,
+  },
 }));
 
 import AdminApp from '@/admin/AdminApp';
@@ -98,6 +125,12 @@ describe('AdminApp users/books observability', () => {
     deleteBook.mockReset().mockResolvedValue({ deleted: 1 });
     getStats.mockReset().mockResolvedValue(undefined);
     downloadBackup.mockReset().mockResolvedValue(undefined);
+    listSnapshots
+      .mockReset()
+      .mockResolvedValue({ enabled: false, intervalHours: null, keep: 3, snapshots: [] });
+    createSnapshot.mockReset();
+    downloadSnapshot.mockReset().mockResolvedValue(undefined);
+    deleteSnapshot.mockReset().mockResolvedValue({ deleted: 'x' });
     localStorage.setItem('token', 'header.payload.sig');
   });
   afterEach(() => {
@@ -174,5 +207,53 @@ describe('AdminApp users/books observability', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Maintenance' }));
     fireEvent.click(screen.getByRole('button', { name: 'Download backup' }));
     await waitFor(() => expect(screen.getByText(/Backup failed/)).toBeTruthy());
+  });
+
+  // ── ⑫-b snapshot chain card ──────────────────────────────────────────────
+
+  it('renders the snapshot chain state and creates a snapshot', async () => {
+    listSnapshots.mockResolvedValue({
+      enabled: true,
+      intervalHours: 24,
+      keep: 3,
+      snapshots: [{ name: 'readest-snapshot-20261119-010101.tar', bytes: 1024 }],
+    });
+    createSnapshot.mockResolvedValue({ name: 'readest-snapshot-20261119-020202.tar', bytes: 2048 });
+    render(<AdminApp />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Maintenance' }));
+    await waitFor(() => expect(listSnapshots).toHaveBeenCalledTimes(1));
+    expect(screen.getByText('Enabled: every {{hours}}h, keeping {{keep}}')).toBeTruthy();
+    expect(screen.getByText('readest-snapshot-20261119-010101.tar')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Take snapshot now' }));
+    await waitFor(() => expect(createSnapshot).toHaveBeenCalledTimes(1));
+    // Raw-key translator: the notice shows the key; the list refreshes (call #2).
+    expect(await screen.findByText('Snapshot {{name}} created')).toBeTruthy();
+    await waitFor(() => expect(listSnapshots).toHaveBeenCalledTimes(2));
+  });
+
+  it('shows the disabled state and empty list when the chain is off', async () => {
+    render(<AdminApp />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Maintenance' }));
+    expect(screen.getByText('Disabled — set SNAPSHOT_INTERVAL_HOURS to enable')).toBeTruthy();
+    expect(await screen.findByText('No snapshots yet')).toBeTruthy();
+    expect(screen.queryByText('Take snapshot now')).toBeTruthy();
+  });
+
+  it('downloads and deletes a snapshot row', async () => {
+    listSnapshots.mockResolvedValue({
+      enabled: false,
+      intervalHours: null,
+      keep: 3,
+      snapshots: [{ name: 'snap-a.tar', bytes: 512 }],
+    });
+    render(<AdminApp />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Maintenance' }));
+    await screen.findByText('snap-a.tar');
+    fireEvent.click(screen.getByRole('button', { name: 'Download' }));
+    await waitFor(() => expect(downloadSnapshot).toHaveBeenCalledWith('snap-a.tar'));
+    expect(await screen.findByText(/snap-a\.tar/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(deleteSnapshot).toHaveBeenCalledWith('snap-a.tar'));
+    await waitFor(() => expect(listSnapshots).toHaveBeenCalledTimes(2));
   });
 });

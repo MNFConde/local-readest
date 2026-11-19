@@ -178,5 +178,13 @@
   "Connect": "Connect",
   "Collapse manual connect": "Collapse manual connect",
   "Enter a valid address like 192.168.1.7:53317": "Enter a valid address like 192.168.1.7:53317",
-  "Connected to {{alias}} — pick it from the list above": "Connected to {{alias}} — pick it from the list above"
+  "Connected to {{alias}} — pick it from the list above": "Connected to {{alias}} — pick it from the list above",
+  "Snapshots": "Snapshots",
+  "Periodic full-server snapshots — the same archive as Download backup, kept on the server under snapshots/.": "Periodic full-server snapshots — the same archive as Download backup, kept on the server under snapshots/.",
+  "Enabled: every {{hours}}h, keeping {{keep}}": "Enabled: every {{hours}}h, keeping {{keep}}",
+  "Disabled — set SNAPSHOT_INTERVAL_HOURS to enable": "Disabled — set SNAPSHOT_INTERVAL_HOURS to enable",
+  "Take snapshot now": "Take snapshot now",
+  "Preparing snapshot…": "Preparing snapshot…",
+  "Snapshot {{name}} created": "Snapshot {{name}} created",
+  "No snapshots yet": "No snapshots yet"
 }

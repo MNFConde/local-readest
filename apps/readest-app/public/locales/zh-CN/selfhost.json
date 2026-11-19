@@ -178,5 +178,13 @@
   "Connect": "连接",
   "Collapse manual connect": "收起手动连接",
   "Enter a valid address like 192.168.1.7:53317": "请输入形如 192.168.1.7:53317 的地址",
-  "Connected to {{alias}} — pick it from the list above": "已连接 {{alias}}——请在上方列表中选择"
+  "Connected to {{alias}} — pick it from the list above": "已连接 {{alias}}——请在上方列表中选择",
+  "Snapshots": "自动快照",
+  "Periodic full-server snapshots — the same archive as Download backup, kept on the server under snapshots/.": "定期全服务器快照——与「下载备份」相同的档案，保留在服务器 snapshots/ 目录下。",
+  "Enabled: every {{hours}}h, keeping {{keep}}": "已启用：每 {{hours}} 小时一份，保留 {{keep}} 份",
+  "Disabled — set SNAPSHOT_INTERVAL_HOURS to enable": "未启用——设置 SNAPSHOT_INTERVAL_HOURS 后开启",
+  "Take snapshot now": "立即快照",
+  "Preparing snapshot…": "正在生成快照…",
+  "Snapshot {{name}} created": "快照 {{name}} 已生成",
+  "No snapshots yet": "还没有快照"
 }
